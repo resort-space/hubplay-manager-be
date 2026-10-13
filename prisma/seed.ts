@@ -1,0 +1,124 @@
+import { PrismaClient, AdminRole, GameKind } from '@prisma/client';
+import { hash } from 'bcryptjs';
+
+const prisma = new PrismaClient();
+
+const slots = [
+  [1, '09:00', '10:00'],
+  [2, '10:15', '11:15'],
+  [3, '11:30', '12:30'],
+  [4, '12:45', '13:45'],
+  [5, '14:00', '15:00'],
+  [6, '15:15', '16:15'],
+  [7, '16:30', '17:30'],
+  [8, '17:45', '18:45'],
+  [9, '19:00', '20:00'],
+  [10, '20:15', '21:15'],
+  [11, '21:30', '22:30'],
+  [12, '22:45', '23:45'],
+  [13, '23:00', '24:00'],
+] as const;
+
+async function main() {
+  const venue = await prisma.venue.upsert({
+    where: { code: 'DER' },
+    update: { name: 'Door Escape Room', address: '6 ngõ 78 đường Lương Ngọc Quyến' },
+    create: {
+      code: 'DER',
+      name: 'Door Escape Room',
+      address: '6 ngõ 78 đường Lương Ngọc Quyến',
+      phone: '',
+    },
+  });
+
+  for (const [slotIndex, startTime, endTime] of slots) {
+    await prisma.timeSlot.upsert({
+      where: { venueId_slotIndex: { venueId: venue.id, slotIndex } },
+      update: { startTime, endTime },
+      create: { venueId: venue.id, slotIndex, startTime, endTime },
+    });
+  }
+
+  const categories = [
+    [GameKind.escape, 'Doors Escape'],
+    [GameKind.board, 'Board game'],
+    [GameKind.sat, 'Kịch bản sát'],
+  ] as const;
+  for (const [kind, name] of categories) {
+    await prisma.gameCategory.upsert({ where: { kind }, update: { name }, create: { kind, name } });
+  }
+  const escape = await prisma.gameCategory.findUniqueOrThrow({ where: { kind: GameKind.escape } });
+
+  const rooms = [
+    { code: 'R1', name: 'Cửa Đỏ', capacity: 6, description: 'Phòng giải đố tối' },
+    { code: 'R2', name: 'Hầm Tối', capacity: 8, description: 'Phòng nhóm đông' },
+  ];
+  for (const room of rooms) {
+    const saved = await prisma.room.upsert({
+      where: { venueId_code: { venueId: venue.id, code: room.code } },
+      update: room,
+      create: { venueId: venue.id, ...room },
+    });
+    await prisma.subGame.upsert({
+      where: { venueId_code: { venueId: venue.id, code: room.code } },
+      update: { name: room.name, basePrice: 350000, roomId: saved.id },
+      create: {
+        venueId: venue.id,
+        categoryId: escape.id,
+        roomId: saved.id,
+        name: room.name,
+        code: room.code,
+        basePrice: 350000,
+        tags: 'kinh dị',
+      },
+    });
+  }
+
+  const drinks = [
+    ['Nước suối', 15000],
+    ['Trà đào', 35000],
+  ] as const;
+  for (const [name, price] of drinks) {
+    const exists = await prisma.drink.findFirst({ where: { venueId: venue.id, name } });
+    if (!exists) await prisma.drink.create({ data: { venueId: venue.id, name, price } });
+  }
+
+  await prisma.discountCode.upsert({
+    where: { venueId_code: { venueId: venue.id, code: 'HUB10' } },
+    update: { amount: 50000, active: true },
+    create: { venueId: venue.id, code: 'HUB10', amount: 50000 },
+  });
+
+  await prisma.cmsContent.upsert({
+    where: { venueId: venue.id },
+    update: {},
+    create: {
+      venueId: venue.id,
+      guide: '1. Chọn phòng và ca còn trống.\n2. Để lại họ tên, email, số điện thoại.\n3. Quầy gọi xác nhận. Giữ chỗ chưa phải thanh toán trên web.\n4. Mỗi khách tự đặt tối đa 2 ca liên tiếp.',
+      priceNote: 'Giá theo phòng, chưa gồm đồ uống tại quầy.',
+      reviews: 'Minh|Phòng tối, nhân viên gọi xác nhận nhanh.\nLan|Đặt trên web, đến chơi đúng ca.',
+    },
+  });
+
+  const passwordHash = await hash('Admin@123', 10);
+  const admins: { username: string; role: AdminRole; venueId: string | null }[] = [
+    { username: 'sysadmin', role: AdminRole.system_admin, venueId: null },
+    { username: 'editadmin', role: AdminRole.edit_admin, venueId: venue.id },
+    { username: 'quay', role: AdminRole.counter_admin, venueId: venue.id },
+  ];
+  for (const admin of admins) {
+    await prisma.adminUser.upsert({
+      where: { username: admin.username },
+      update: { role: admin.role, venueId: admin.venueId, active: true },
+      create: { ...admin, passwordHash },
+    });
+  }
+}
+
+main()
+  .then(() => prisma.$disconnect())
+  .catch(async (error) => {
+    console.error(error);
+    await prisma.$disconnect();
+    process.exit(1);
+  });

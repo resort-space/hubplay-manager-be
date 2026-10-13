@@ -1,0 +1,266 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AdminRole {
+  system_admin
+  edit_admin
+  counter_admin
+}
+
+enum GameKind {
+  escape
+  board
+  sat
+}
+
+enum BookingStatus {
+  pending_confirm
+  confirmed
+  cancelled
+}
+
+enum BillType {
+  game
+  fnb
+}
+
+enum PaymentMethod {
+  cash
+  transfer
+}
+
+enum PaymentStatus {
+  unpaid
+  partial
+  paid
+}
+
+enum BillLineKind {
+  subgame
+  fnb_item
+  extra_manual
+  discount
+}
+
+model Venue {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  address   String
+  phone     String   @default("")
+  active    Boolean  @default(true)
+  rooms     Room[]
+  slots     TimeSlot[]
+  subGames  SubGame[]
+  drinks    Drink[]
+  bookings  Booking[]
+  receipts  Receipt[]
+  dayCloses DayClose[]
+  admins    AdminUser[]
+  discounts DiscountCode[]
+  cms       CmsContent?
+  photos    UserPlayPhoto[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  name      String   @default("")
+  email     String   @default("")
+  bookings  Booking[]
+  photos    UserPlayPhoto[]
+}
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String
+  role         AdminRole
+  active       Boolean   @default(true)
+  venueId      String?
+  venue        Venue?    @relation(fields: [venueId], references: [id])
+  createdById  String?
+}
+
+model GameCategory {
+  id       String   @id @default(cuid())
+  kind     GameKind @unique
+  name     String
+  subGames SubGame[]
+}
+
+model SubGame {
+  id         String       @id @default(cuid())
+  venueId    String
+  venue      Venue        @relation(fields: [venueId], references: [id])
+  categoryId String
+  category   GameCategory @relation(fields: [categoryId], references: [id])
+  roomId     String?
+  room       Room?        @relation(fields: [roomId], references: [id])
+  name       String
+  code       String
+  basePrice  Int
+  tags       String       @default("")
+  active     Boolean      @default(true)
+  @@unique([venueId, code])
+}
+
+model Room {
+  id          String    @id @default(cuid())
+  venueId     String
+  venue       Venue     @relation(fields: [venueId], references: [id])
+  name        String
+  code        String
+  capacity    Int       @default(8)
+  description String    @default("")
+  active      Boolean   @default(true)
+  subGames    SubGame[]
+  bookings    Booking[]
+  @@unique([venueId, code])
+}
+
+model TimeSlot {
+  id        String  @id @default(cuid())
+  venueId   String
+  venue     Venue   @relation(fields: [venueId], references: [id])
+  slotIndex Int
+  startTime String
+  endTime   String
+  enabled   Boolean @default(true)
+  @@unique([venueId, slotIndex])
+}
+
+model Booking {
+  id           String        @id @default(cuid())
+  venueId      String
+  venue        Venue         @relation(fields: [venueId], references: [id])
+  roomId       String
+  room         Room          @relation(fields: [roomId], references: [id])
+  userId       String?
+  user         User?         @relation(fields: [userId], references: [id])
+  date         String
+  slotIndex    Int
+  sessionCode  String?
+  playerCount  Int
+  phone        String
+  guestName    String        @default("")
+  email        String        @default("")
+  note         String        @default("")
+  status       BookingStatus @default(pending_confirm)
+  createdBy    String        @default("user")
+  createdAt    DateTime      @default(now())
+  receipts     Receipt[]
+}
+
+model DiscountCode {
+  id       String  @id @default(cuid())
+  venueId  String
+  venue    Venue   @relation(fields: [venueId], references: [id])
+  code     String
+  amount   Int
+  active   Boolean @default(true)
+  @@unique([venueId, code])
+}
+
+model Drink {
+  id      String  @id @default(cuid())
+  venueId String
+  venue   Venue   @relation(fields: [venueId], references: [id])
+  name    String
+  price   Int
+  active  Boolean @default(true)
+}
+
+model Receipt {
+  id              String         @id @default(cuid())
+  venueId         String
+  venue           Venue          @relation(fields: [venueId], references: [id])
+  bookingId       String?
+  booking         Booking?       @relation(fields: [bookingId], references: [id])
+  phone           String
+  guestName       String         @default("")
+  paymentMethod   PaymentMethod?
+  paymentStatus   PaymentStatus  @default(unpaid)
+  createdAt       DateTime       @default(now())
+  bills           Bill[]
+  payments        BillPaymentHistory[]
+}
+
+model Bill {
+  id            String        @id @default(cuid())
+  receiptId     String
+  receipt       Receipt       @relation(fields: [receiptId], references: [id])
+  type          BillType
+  categoryKind  GameKind?
+  total         Int
+  lines         BillLine[]
+}
+
+model BillLine {
+  id          String       @id @default(cuid())
+  billId      String
+  bill        Bill         @relation(fields: [billId], references: [id])
+  kind        BillLineKind
+  description String
+  qty         Int
+  unitPrice   Int
+}
+
+model BillPaymentHistory {
+  id        String        @id @default(cuid())
+  receiptId String
+  receipt   Receipt       @relation(fields: [receiptId], references: [id])
+  amount    Int
+  method    PaymentMethod
+  paidAt    DateTime      @default(now())
+  staffId   String?
+  note      String        @default("")
+}
+
+model DayClose {
+  id               String   @id @default(cuid())
+  venueId          String
+  venue            Venue    @relation(fields: [venueId], references: [id])
+  date             String
+  closedAt         DateTime @default(now())
+  closedByAdminId  String
+  @@unique([venueId, date])
+}
+
+model UserPlayPhoto {
+  id                String   @id @default(cuid())
+  venueId           String
+  venue             Venue    @relation(fields: [venueId], references: [id])
+  userId            String?
+  user              User?    @relation(fields: [userId], references: [id])
+  phone             String
+  billId            String?
+  bookingId         String?
+  fileRef           String
+  caption           String   @default("")
+  uploadedByStaffId String?
+  uploadedAt        DateTime @default(now())
+}
+
+model CmsContent {
+  id         String @id @default(cuid())
+  venueId    String @unique
+  venue      Venue  @relation(fields: [venueId], references: [id])
+  guide      String
+  priceNote  String @default("")
+  reviews    String @default("")
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String
+  content   String
+  createdAt DateTime @default(now())
+}
