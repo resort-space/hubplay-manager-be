@@ -25,3 +25,15 @@ Tài khoản seed, mật khẩu `Admin@123`:
 OTP dev luôn là `000000` khi `OTP_DEV=true`.
 
 Cơ sở seed: Door Escape, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`.
+
+In phiếu qua QZ Tray cần chứng chỉ ký. Lần đầu gọi `/api/v1/qz/certificate` hoặc `/api/v1/qz/sign`, server tạo cặp khóa trong thư mục `qz/` (đã nằm trong `.gitignore`). Khóa riêng không đưa lên git. Chỉ admin đã đăng nhập mới lấy chứng chỉ và chữ ký.
+
+QZ Tray báo **Untrusted website** và **Invalid certificate** khi chưa cài chứng chỉ này. Trên máy quầy:
+
+1. Copy `qz/certificate.pem`. Không copy `qz/private-key.pem`.
+2. Đổi tên thành `override.crt`.
+3. Dán vào thư mục cài QZ Tray, thường là `C:\Program Files\QZ Tray\`. Nếu Windows không cho ghi, dán vào `%AppData%\qz\`.
+4. Chuột phải icon QZ Tray, chọn **Exit**, rồi mở QZ Tray lại.
+5. Tải lại trang quầy, bấm **Lưu và in**. Tick **Remember** rồi bấm **Allow**.
+
+QZ Tray phải đang chạy. Web tìm máy có tên **XP-T80L** hoặc **Xprinter**, không có thì dùng máy in mặc định. Không chọn máy in trong QZ.

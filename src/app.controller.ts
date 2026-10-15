@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -15,12 +16,13 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
-import { AdminRole, BillLineKind, GameKind, PaymentMethod } from '@prisma/client';
+import { AdminRole, BillLineKind, GameKind, PaymentMethod, PricingUnit } from '@prisma/client';
 import { compare, hash } from 'bcryptjs';
 import type { Request, Response } from 'express';
 import { HubService } from './hub.service';
 import { PrismaService } from './prisma.service';
 import { readSession, signSession, SessionPayload } from './auth.util';
+import { qzCertificate, qzSign } from './qz-sign';
 
 function sessionOf(req: Request): SessionPayload | null {
   return readSession(req.cookies?.hub_session);
@@ -73,6 +75,20 @@ export class AppController {
   logout(@Res({ passthrough: true }) res: Response) {
     res.clearCookie('hub_session', { path: '/' });
     return { ok: true };
+  }
+
+  @Get('qz/certificate')
+  async qzCert(@Req() req: Request) {
+    if (sessionOf(req)?.kind !== 'admin') throw new UnauthorizedException('Cần đăng nhập admin');
+    return { certificate: await qzCertificate() };
+  }
+
+  @Post('qz/sign')
+  async qzSignature(@Req() req: Request, @Body() body: { request?: string }) {
+    if (sessionOf(req)?.kind !== 'admin') throw new UnauthorizedException('Cần đăng nhập admin');
+    const request = body.request?.trim();
+    if (!request) throw new BadRequestException('Thiếu nội dung ký');
+    return { signature: await qzSign(request) };
   }
 
   @Get('auth/me')
@@ -171,8 +187,33 @@ export class AppController {
   }
 
   @Post('sub-games')
-  saveGame(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; basePrice: number; kind: GameKind; roomId?: string; tags?: string; active?: boolean; venueId?: string }) {
+  saveGame(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; basePrice: number; kind?: GameKind; categoryId?: string; pricingUnit?: PricingUnit; roomId?: string; tags?: string; active?: boolean; venueId?: string }) {
     return this.hub.saveSubGame(sessionOf(req), body);
+  }
+
+  @Delete('sub-games/:id')
+  removeGame(@Req() req: Request, @Param('id') id: string, @Query('venueId') venueId?: string) {
+    return this.hub.deleteSubGame(sessionOf(req), id, venueId);
+  }
+
+  @Get('game-categories')
+  gameCategories(@Req() req: Request, @Query('venueId') venueId?: string) {
+    return this.hub.listCategories(sessionOf(req), venueId);
+  }
+
+  @Post('game-categories')
+  addCategory(@Req() req: Request, @Body() body: { name: string; billMode: GameKind; venueId?: string }) {
+    return this.hub.saveCategory(sessionOf(req), body);
+  }
+
+  @Patch('game-categories/:id')
+  renameCategory(@Req() req: Request, @Param('id') id: string, @Body() body: { name: string; venueId?: string }) {
+    return this.hub.renameCategory(sessionOf(req), id, body.name, body.venueId);
+  }
+
+  @Delete('game-categories/:id')
+  removeCategory(@Req() req: Request, @Param('id') id: string, @Query('venueId') venueId?: string) {
+    return this.hub.deleteCategory(sessionOf(req), id, venueId);
   }
 
   @Post('drinks')
@@ -219,8 +260,10 @@ export class AppController {
       phone: string;
       guestName?: string;
       bookingId?: string;
+      playTime?: string;
+      playSession?: string;
       paymentMethod: PaymentMethod;
-      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; code?: string }[];
+      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; categoryId?: string; subGameId?: string; playerCount?: number; code?: string }[];
       venueId?: string;
     },
   ) {

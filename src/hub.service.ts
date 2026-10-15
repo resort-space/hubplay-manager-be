@@ -4,11 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AdminRole, BillLineKind, BillType, BookingStatus, GameKind, PaymentMethod, Prisma } from '@prisma/client';
+import { AdminRole, BillLineKind, BillType, BookingStatus, GameKind, PaymentMethod, PricingUnit, Prisma } from '@prisma/client';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { PrismaService } from './prisma.service';
 import { SessionPayload } from './auth.util';
+import { ensureDefaultCategories, ensureEscapeCategory } from './categories';
 
 const otpStore = new Map<string, { code: string; exp: number }>();
 
@@ -110,6 +111,7 @@ export class HubService {
           data: defaultSlots.map(([slotIndex, startTime, endTime]) => ({ venueId: venue.id, slotIndex, startTime, endTime })),
         });
         await tx.cmsContent.create({ data: { venueId: venue.id, guide: '', priceNote: '', reviews: '' } });
+        await ensureDefaultCategories(tx, venue.id);
         return venue;
       });
     } catch (error) {
@@ -160,6 +162,7 @@ export class HubService {
     if (admins) throw new BadRequestException('Còn tài khoản gắn cơ sở này');
     await this.prisma.$transaction(async (tx) => {
       await tx.subGame.deleteMany({ where: { venueId: id } });
+      await tx.gameCategory.deleteMany({ where: { venueId: id } });
       await tx.room.deleteMany({ where: { venueId: id } });
       await tx.drink.deleteMany({ where: { venueId: id } });
       await tx.discountCode.deleteMany({ where: { venueId: id } });
@@ -172,7 +175,7 @@ export class HubService {
 
   async publicHome(session: SessionPayload | null, venueId?: string) {
     const venue = await this.resolveVenue(session, venueId);
-    const [rooms, slots, drinks, discounts, cms, subGames] = await Promise.all([
+    const [rooms, slots, drinks, discounts, cms, subGames, categories] = await Promise.all([
       this.prisma.room.findMany({ where: { venueId: venue.id, active: true }, orderBy: { code: 'asc' } }),
       this.prisma.timeSlot.findMany({ where: { venueId: venue.id, enabled: true }, orderBy: { slotIndex: 'asc' } }),
       this.prisma.drink.findMany({ where: { venueId: venue.id, active: true }, orderBy: { name: 'asc' } }),
@@ -183,14 +186,19 @@ export class HubService {
         include: { category: true, room: true },
         orderBy: { name: 'asc' },
       }),
+      this.prisma.gameCategory.findMany({
+        where: { venueId: venue.id },
+        select: { id: true, name: true, billMode: true },
+        orderBy: { name: 'asc' },
+      }),
     ]);
-    return { venue, rooms, slots, drinks, discounts, cms, subGames };
+    return { venue, rooms, slots, drinks, discounts, cms, subGames, categories };
   }
 
   async slotsFor(roomId: string, date: string, session: SessionPayload | null, venueId?: string) {
     const venue = await this.resolveVenue(session, venueId);
     const room = await this.prisma.room.findFirst({ where: { id: roomId, venueId: venue.id } });
-    if (!room) throw new NotFoundException('Không thấy phòng');
+    if (!room) throw new NotFoundException('Không thấy game');
     const slots = await this.prisma.timeSlot.findMany({
       where: { venueId: venue.id, enabled: true },
       orderBy: { slotIndex: 'asc' },
@@ -246,7 +254,7 @@ export class HubService {
     const venue = await this.resolveVenue(session?.kind === 'admin' ? session : null, input.venueId);
     const slots = this.assertConsecutive(input.slotIndexes);
     const room = await this.prisma.room.findFirst({ where: { id: input.roomId, venueId: venue.id, active: true } });
-    if (!room) throw new NotFoundException('Không thấy phòng');
+    if (!room) throw new NotFoundException('Không thấy game');
     if (input.playerCount < 1 || input.playerCount > room.capacity) {
       throw new BadRequestException(`Số người từ 1 đến ${room.capacity}`);
     }
@@ -323,6 +331,7 @@ export class HubService {
   async saveRoom(session: SessionPayload | null, data: { id?: string; name: string; code: string; capacity: number; description?: string; active?: boolean; venueId?: string }) {
     const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
     const venue = await this.resolveVenue(staff, data.venueId);
+    await this.assertCodeFree(venue.id, data.code, { roomId: data.id });
     try {
       if (data.id) {
         const room = await this.prisma.room.findUnique({ where: { id: data.id } });
@@ -346,9 +355,12 @@ export class HubService {
     const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
     const venue = await this.resolveVenue(staff, venueId);
     const room = await this.prisma.room.findUnique({ where: { id } });
-    if (!room || room.venueId !== venue.id) throw new NotFoundException('Không thấy phòng');
+    if (!room || room.venueId !== venue.id) throw new NotFoundException('Không thấy game');
     const bookings = await this.prisma.booking.count({ where: { roomId: id } });
-    if (bookings) throw new BadRequestException('Phòng đã có lịch đặt, không xóa được');
+    if (bookings) throw new BadRequestException('Game đã có lịch đặt, không xóa được');
+    const linked = await this.prisma.subGame.findMany({ where: { roomId: id }, select: { id: true } });
+    const used = await this.prisma.billLine.count({ where: { subGameId: { in: linked.map((game) => game.id) } } });
+    if (used) throw new BadRequestException('Game đã có bill, không xóa được');
     await this.prisma.$transaction(async (tx) => {
       await tx.subGame.deleteMany({ where: { roomId: id } });
       await tx.room.delete({ where: { id } });
@@ -356,36 +368,129 @@ export class HubService {
     return { ok: true };
   }
 
-  async saveSubGame(session: SessionPayload | null, data: { id?: string; name: string; code: string; basePrice: number; kind: GameKind; roomId?: string; tags?: string; active?: boolean; venueId?: string }) {
+  private async assertCodeFree(venueId: string, code: string, except?: { roomId?: string; subGameId?: string }) {
+    const trimmed = code?.trim();
+    if (!trimmed) throw new BadRequestException('Nhập mã');
+    const room = await this.prisma.room.findFirst({ where: { venueId, code: trimmed } });
+    if (room && room.id !== except?.roomId) throw new BadRequestException('Mã đã có');
+    const game = await this.prisma.subGame.findFirst({ where: { venueId, code: trimmed } });
+    if (game && game.id !== except?.subGameId && game.roomId !== except?.roomId) throw new BadRequestException('Mã đã có');
+  }
+
+  async saveSubGame(session: SessionPayload | null, data: { id?: string; name: string; code: string; basePrice: number; kind?: GameKind; categoryId?: string; pricingUnit?: PricingUnit; roomId?: string; tags?: string; active?: boolean; venueId?: string }) {
     const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
     const venue = await this.resolveVenue(staff, data.venueId);
-    const category = await this.prisma.gameCategory.findUnique({ where: { kind: data.kind } });
-    if (!category) throw new BadRequestException('Loại game không hợp lệ');
+    const name = data.name?.trim();
+    const code = data.code?.trim();
+    if (!name || !code) throw new BadRequestException('Nhập tên và mã');
+    const existing = data.id ? await this.prisma.subGame.findUnique({ where: { id: data.id } }) : null;
+    if (data.id && (!existing || existing.venueId !== venue.id)) throw new ForbiddenException('Không đúng cơ sở');
+    let category = data.categoryId
+      ? await this.prisma.gameCategory.findUnique({ where: { id: data.categoryId } })
+      : data.kind
+        ? await this.prisma.gameCategory.findFirst({ where: { venueId: venue.id, billMode: data.kind }, orderBy: { id: 'asc' } })
+        : null;
+    if (!category && data.kind === GameKind.escape) category = await ensureEscapeCategory(this.prisma, venue.id);
+    if (!category || category.venueId !== venue.id) throw new BadRequestException('Chọn phòng');
+    if (!existing && category.billMode === GameKind.escape && !data.roomId) throw new BadRequestException('Game đặt lịch thêm trong phòng Doors Escape');
+    const roomId = data.roomId || existing?.roomId || null;
+    await this.assertCodeFree(venue.id, code, { roomId: roomId || undefined, subGameId: existing?.id });
+    const pricingUnit = category.billMode === GameKind.board && data.pricingUnit === PricingUnit.per_hour ? PricingUnit.per_hour : PricingUnit.per_session;
     try {
-      if (data.id) {
-        const game = await this.prisma.subGame.findUnique({ where: { id: data.id } });
-        if (!game || game.venueId !== venue.id) throw new ForbiddenException('Không đúng cơ sở');
+      if (existing) {
         return await this.prisma.subGame.update({
-          where: { id: data.id },
-          data: { name: data.name, code: data.code, basePrice: data.basePrice, categoryId: category.id, roomId: data.roomId || null, tags: data.tags ?? '', active: data.active ?? true },
+          where: { id: existing.id },
+          data: { name, code, basePrice: data.basePrice, categoryId: category.id, pricingUnit, roomId, tags: data.tags ?? existing.tags, active: data.active ?? existing.active },
         });
       }
       return await this.prisma.subGame.create({
-        data: {
-          venueId: venue.id,
-          categoryId: category.id,
-          roomId: data.roomId || null,
-          name: data.name,
-          code: data.code,
-          basePrice: data.basePrice,
-          tags: data.tags ?? '',
-        },
+        data: { venueId: venue.id, categoryId: category.id, roomId, name, code, basePrice: data.basePrice, pricingUnit, tags: data.tags ?? '' },
       });
     } catch (error) {
       if (error instanceof ForbiddenException || error instanceof BadRequestException) throw error;
       if (isUnique(error)) throw new BadRequestException('Mã đã có');
       throw error;
     }
+  }
+
+  async deleteSubGame(session: SessionPayload | null, id: string, venueId?: string) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const venue = await this.resolveVenue(staff, venueId);
+    const game = await this.prisma.subGame.findUnique({ where: { id } });
+    if (!game || game.venueId !== venue.id) throw new NotFoundException('Không thấy game');
+    if (game.roomId) throw new BadRequestException('Xóa game đặt lịch trong phòng Doors Escape');
+    const used = await this.prisma.billLine.count({ where: { subGameId: id } });
+    if (used) throw new BadRequestException('Game đã có bill, không xóa được');
+    await this.prisma.subGame.delete({ where: { id } });
+    return { ok: true };
+  }
+
+  async listCategories(session: SessionPayload | null, venueId?: string) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const venue = await this.resolveVenue(staff, venueId);
+    return this.prisma.gameCategory.findMany({
+      where: { venueId: venue.id },
+      include: { subGames: { include: { category: true, room: true }, orderBy: { name: 'asc' } } },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async saveCategory(session: SessionPayload | null, data: { name: string; billMode: GameKind; venueId?: string }) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const venue = await this.resolveVenue(staff, data.venueId);
+    const name = data.name?.trim();
+    if (!name) throw new BadRequestException('Nhập tên phòng');
+    if (data.billMode !== GameKind.board && data.billMode !== GameKind.sat) throw new BadRequestException('Chọn cách tính một lần hoặc theo giờ');
+    try {
+      return await this.prisma.gameCategory.create({ data: { venueId: venue.id, name, billMode: data.billMode } });
+    } catch (error) {
+      if (isUnique(error)) throw new BadRequestException('Tên phòng đã có');
+      throw error;
+    }
+  }
+
+  async renameCategory(session: SessionPayload | null, id: string, name: string, venueId?: string) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const venue = await this.resolveVenue(staff, venueId);
+    const category = await this.prisma.gameCategory.findUnique({ where: { id } });
+    if (!category || category.venueId !== venue.id) throw new NotFoundException('Không thấy phòng');
+    const next = name?.trim();
+    if (!next) throw new BadRequestException('Nhập tên phòng');
+    try {
+      return await this.prisma.gameCategory.update({ where: { id }, data: { name: next } });
+    } catch (error) {
+      if (isUnique(error)) throw new BadRequestException('Tên phòng đã có');
+      throw error;
+    }
+  }
+
+  async deleteCategory(session: SessionPayload | null, id: string, venueId?: string) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const venue = await this.resolveVenue(staff, venueId);
+    const category = await this.prisma.gameCategory.findUnique({ where: { id }, include: { subGames: { select: { id: true } } } });
+    if (!category || category.venueId !== venue.id) throw new NotFoundException('Không thấy phòng');
+    const childIds = category.subGames.map((game) => game.id);
+    const [bills, lineRefs, oldest] = await Promise.all([
+      this.prisma.bill.count({ where: { categoryId: id } }),
+      this.prisma.billLine.count({ where: { subGameId: { in: childIds } } }),
+      this.prisma.gameCategory.findFirst({ where: { venueId: venue.id, billMode: category.billMode }, orderBy: { id: 'asc' }, select: { id: true } }),
+    ]);
+    const legacy = oldest?.id === id
+      ? await this.prisma.bill.count({ where: { categoryId: null, categoryKind: category.billMode, receipt: { venueId: venue.id } } })
+      : 0;
+    if (bills || lineRefs || legacy) throw new BadRequestException('Phòng đã có bill, không xóa được');
+    if (category.billMode === GameKind.escape) {
+      const [rooms, bookings] = await Promise.all([
+        this.prisma.room.count({ where: { venueId: venue.id } }),
+        this.prisma.booking.count({ where: { venueId: venue.id } }),
+      ]);
+      if (rooms || bookings) throw new BadRequestException('Còn game đang đặt hoặc còn lịch, không xóa phòng này');
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.subGame.deleteMany({ where: { categoryId: id } });
+      await tx.gameCategory.delete({ where: { id } });
+    });
+    return { ok: true };
   }
 
   async saveDrink(session: SessionPayload | null, data: { id?: string; name: string; price: number; active?: boolean; venueId?: string }) {
@@ -472,22 +577,38 @@ export class HubService {
       phone: string;
       guestName?: string;
       bookingId?: string;
+      playTime?: string;
+      playSession?: string;
       paymentMethod: PaymentMethod;
-      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; code?: string }[];
+      lines: ReceiptLineInput[];
       venueId?: string;
     },
   ) {
     const staff = this.assertStaff(session, [AdminRole.counter_admin, AdminRole.system_admin, AdminRole.edit_admin]);
     const venue = await this.resolveVenue(staff, input.venueId);
+    if (!input.lines.length) throw new BadRequestException('Phiếu chưa có dòng');
+    const lines = await this.pricedLines(venue.id, input.lines);
+    const gameLines = lines.filter((line) => line.ledger === 'game');
+    const fnbLines = lines.filter((line) => line.ledger === 'fnb');
+    const games = gameLines.filter((line) => line.kind === BillLineKind.subgame);
+    const modes = new Set(games.map((line) => line.categoryKind).filter((mode): mode is GameKind => Boolean(mode)));
+    const parents = new Set(games.map((line) => line.categoryId).filter((id): id is string => Boolean(id)));
+    if (modes.size > 1 || parents.size > 1) throw new BadRequestException('Một phiếu chỉ một phòng');
+    const mode = [...modes][0];
+    const walkIn = Boolean(mode && mode !== GameKind.escape);
+    const playTime = walkIn ? (input.playTime || '').trim() : '';
+    const playSession = walkIn ? (input.playSession || '').trim() : '';
+    if (walkIn && games.length) {
+      if (!playTime) throw new BadRequestException('Nhập thời gian');
+      if (!playSession) throw new BadRequestException('Nhập ca chơi');
+    }
+    if (input.bookingId && mode && mode !== GameKind.escape) throw new BadRequestException('Phiếu phòng này không gắn ca');
     if (input.bookingId) {
       const booking = await this.prisma.booking.findUnique({ where: { id: input.bookingId } });
       if (!booking || booking.venueId !== venue.id) throw new BadRequestException('Ca không thuộc cơ sở này');
     }
-    if (!input.lines.length) throw new BadRequestException('Phiếu chưa có dòng');
-    const lines = await this.pricedLines(venue.id, input.lines);
-    const gameLines = lines.filter((l) => l.ledger === 'game');
-    const fnbLines = lines.filter((l) => l.ledger === 'fnb');
-    const sum = (rows: typeof lines) => rows.reduce((s, l) => s + l.qty * l.unitPrice, 0);
+    const anchor = games[0];
+    const sum = (rows: ReceiptLine[]) => rows.reduce((total, line) => total + line.qty * line.unitPrice, 0);
     const total = sum(lines);
     return this.prisma.$transaction(async (tx) => {
       const receipt = await tx.receipt.create({
@@ -496,31 +617,36 @@ export class HubService {
           bookingId: input.bookingId || null,
           phone: input.phone,
           guestName: input.guestName || '',
+          playTime,
+          playSession,
           paymentMethod: input.paymentMethod,
           paymentStatus: 'paid',
         },
       });
-      const makeBill = async (type: BillType, rows: typeof lines) => {
+      const makeBill = async (type: BillType, rows: ReceiptLine[], category?: { id?: string | null; kind?: GameKind | null }) => {
         if (!rows.length) return;
         const bill = await tx.bill.create({
           data: {
             receiptId: receipt.id,
             type,
-            categoryKind: rows.find((r) => r.categoryKind)?.categoryKind,
+            categoryId: category?.id || null,
+            categoryKind: category?.kind || null,
             total: sum(rows),
           },
         });
         await tx.billLine.createMany({
-          data: rows.map((r) => ({
+          data: rows.map((row) => ({
             billId: bill.id,
-            kind: r.kind,
-            description: r.description,
-            qty: r.qty,
-            unitPrice: r.unitPrice,
+            kind: row.kind,
+            description: row.description,
+            qty: row.qty,
+            unitPrice: row.unitPrice,
+            subGameId: row.subGameId || null,
+            playerCount: row.playerCount ?? null,
           })),
         });
       };
-      await makeBill(BillType.game, gameLines);
+      await makeBill(BillType.game, gameLines, anchor ? { id: anchor.categoryId, kind: anchor.categoryKind } : undefined);
       await makeBill(BillType.fnb, fnbLines);
       await tx.billPaymentHistory.create({
         data: { receiptId: receipt.id, amount: total, method: input.paymentMethod, staffId: session!.sub },
@@ -529,27 +655,58 @@ export class HubService {
     });
   }
 
-  private async pricedLines(
-    venueId: string,
-    lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; code?: string }[],
-  ) {
+  private async pricedLines(venueId: string, lines: ReceiptLineInput[]) {
     if (lines.filter((line) => line.kind === BillLineKind.discount).length > 1) throw new BadRequestException('Chỉ chọn một mã giảm');
-    const priced: typeof lines = [];
+    const priced: ReceiptLine[] = [];
     for (const line of lines) {
-      if (line.kind !== BillLineKind.discount) {
-        priced.push(line);
+      if (line.kind === BillLineKind.discount) {
+        const code = line.code?.trim().toUpperCase();
+        if (!code) throw new BadRequestException('Chọn mã giảm');
+        const found = await this.prisma.discountCode.findUnique({ where: { venueId_code: { venueId, code } } });
+        if (!found?.active) throw new BadRequestException('Mã giảm không dùng được');
+        priced.push({
+          kind: BillLineKind.discount,
+          description: `Khuyến mãi ${found.code}`,
+          qty: 1,
+          unitPrice: -found.amount,
+          ledger: 'game',
+        });
         continue;
       }
-      const code = line.code?.trim().toUpperCase();
-      if (!code) throw new BadRequestException('Chọn mã giảm');
-      const found = await this.prisma.discountCode.findUnique({ where: { venueId_code: { venueId, code } } });
-      if (!found?.active) throw new BadRequestException('Mã giảm không dùng được');
+      if (line.kind !== BillLineKind.subgame || !line.subGameId) {
+        if (line.kind === BillLineKind.subgame && line.categoryKind && line.categoryKind !== GameKind.escape) {
+          throw new BadRequestException('Chọn game');
+        }
+        priced.push({ ...line, playerCount: null, subGameId: line.subGameId || null, categoryId: line.categoryId || null, categoryKind: line.categoryKind || null });
+        continue;
+      }
+      const game = await this.prisma.subGame.findUnique({ where: { id: line.subGameId }, include: { category: true } });
+      if (!game || game.venueId !== venueId || !game.active || !game.category) throw new BadRequestException('Game không bán');
+      if (game.category.billMode === GameKind.escape) {
+        priced.push({
+          ...line,
+          categoryId: game.categoryId,
+          categoryKind: GameKind.escape,
+          subGameId: game.id,
+          playerCount: null,
+        });
+        continue;
+      }
+      const playerCount = Number(line.playerCount);
+      if (!Number.isInteger(playerCount) || playerCount < 1) throw new BadRequestException('Nhập số người');
+      const hourly = game.pricingUnit === PricingUnit.per_hour;
+      const qty = hourly ? Math.floor(Number(line.qty)) : 1;
+      if (!Number.isInteger(qty) || qty < 1) throw new BadRequestException('Nhập số giờ');
       priced.push({
-        kind: BillLineKind.discount,
-        description: `Khuyến mãi ${found.code}`,
-        qty: 1,
-        unitPrice: -found.amount,
-        ledger: 'game' as const,
+        kind: BillLineKind.subgame,
+        description: `${game.name} · ${playerCount} người`,
+        qty,
+        unitPrice: game.basePrice,
+        ledger: 'game',
+        categoryId: game.categoryId,
+        categoryKind: game.category.billMode,
+        subGameId: game.id,
+        playerCount,
       });
     }
     const total = priced.reduce((sum, line) => sum + line.qty * line.unitPrice, 0);
@@ -624,21 +781,35 @@ export class HubService {
       where: { venueId: venue.id, paymentStatus: 'paid' },
       include: { bills: true },
     });
-    const buckets = { escape: 0, board: 0, sat: 0, fnb: 0, game: 0 };
+    const categories = await this.prisma.gameCategory.findMany({ where: { venueId: venue.id }, orderBy: { id: 'asc' } });
+    const totals = new Map(categories.map((category) => [category.id, 0]));
+    const defaultByMode = new Map<GameKind, string>();
+    for (const category of categories) {
+      if (!defaultByMode.has(category.billMode)) defaultByMode.set(category.billMode, category.id);
+    }
+    let fnb = 0;
+    let game = 0;
     for (const r of receipts) {
       const day = toVnDate(r.createdAt);
       if (!dates.includes(day)) continue;
       for (const b of r.bills) {
-        if (b.type === 'fnb') buckets.fnb += b.total;
-        else {
-          buckets.game += b.total;
-          if (b.categoryKind === 'escape') buckets.escape += b.total;
-          if (b.categoryKind === 'board') buckets.board += b.total;
-          if (b.categoryKind === 'sat') buckets.sat += b.total;
+        if (b.type === 'fnb') {
+          fnb += b.total;
+          continue;
         }
+        game += b.total;
+        const bucket = b.categoryId || (b.categoryKind ? defaultByMode.get(b.categoryKind) : undefined);
+        if (bucket && totals.has(bucket)) totals.set(bucket, (totals.get(bucket) || 0) + b.total);
       }
     }
-    return { year, period, closedDays: dates.length, ...buckets };
+    return {
+      year,
+      period,
+      closedDays: dates.length,
+      fnb,
+      game,
+      categories: categories.map((category) => ({ id: category.id, name: category.name, billMode: category.billMode, total: totals.get(category.id) || 0 })),
+    };
   }
 
   async savePhoto(session: SessionPayload | null, phone: string, file: Express.Multer.File, bookingId?: string, billId?: string, caption?: string, venueId?: string) {
@@ -682,6 +853,31 @@ export class HubService {
     return this.prisma.contactMessage.create({ data: { name, phone, content } });
   }
 }
+
+type ReceiptLineInput = {
+  kind: BillLineKind;
+  description: string;
+  qty: number;
+  unitPrice: number;
+  ledger: 'game' | 'fnb';
+  categoryKind?: GameKind | null;
+  categoryId?: string | null;
+  subGameId?: string | null;
+  playerCount?: number | null;
+  code?: string;
+};
+
+type ReceiptLine = {
+  kind: BillLineKind;
+  description: string;
+  qty: number;
+  unitPrice: number;
+  ledger: 'game' | 'fnb';
+  categoryKind?: GameKind | null;
+  categoryId?: string | null;
+  subGameId?: string | null;
+  playerCount?: number | null;
+};
 
 function isUnique(error: unknown) {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';

@@ -1,5 +1,6 @@
 import { PrismaClient, AdminRole, GameKind } from '@prisma/client';
 import { hash } from 'bcryptjs';
+import { ensureDefaultCategories } from '../src/categories';
 
 const prisma = new PrismaClient();
 
@@ -39,15 +40,11 @@ async function main() {
     });
   }
 
-  const categories = [
-    [GameKind.escape, 'Doors Escape'],
-    [GameKind.board, 'Board game'],
-    [GameKind.sat, 'Kịch bản sát'],
-  ] as const;
-  for (const [kind, name] of categories) {
-    await prisma.gameCategory.upsert({ where: { kind }, update: { name }, create: { kind, name } });
-  }
-  const escape = await prisma.gameCategory.findUniqueOrThrow({ where: { kind: GameKind.escape } });
+  await placeCategories();
+  const escape = await prisma.gameCategory.findFirstOrThrow({
+    where: { venueId: venue.id, billMode: GameKind.escape },
+    orderBy: { id: 'asc' },
+  });
 
   const rooms = [
     { code: 'R1', name: 'Cửa Đỏ', capacity: 6, description: 'Phòng giải đố tối' },
@@ -113,6 +110,30 @@ async function main() {
       create: { ...admin, passwordHash },
     });
   }
+}
+
+async function placeCategories() {
+  const venues = await prisma.venue.findMany({ orderBy: { code: 'asc' } });
+  const loose = await prisma.$queryRaw<{ id: string; kind: GameKind; name: string }[]>`
+    SELECT id, kind, name FROM "GameCategory" WHERE "venueId" IS NULL
+  `;
+  for (const category of loose) {
+    const games = await prisma.subGame.findMany({ where: { categoryId: category.id }, select: { venueId: true } });
+    const venueIds = [...new Set(games.map((game) => game.venueId))];
+    const primary = venueIds[0] || venues.find((item) => item.code === 'DER')?.id || venues[0]?.id;
+    if (!primary) continue;
+    await prisma.gameCategory.update({ where: { id: category.id }, data: { venueId: primary } });
+    for (const venueId of venueIds.filter((id) => id !== primary)) {
+      const clone = await prisma.gameCategory.create({
+        data: { venueId, billMode: category.kind, name: category.name },
+      });
+      await prisma.subGame.updateMany({
+        where: { venueId, categoryId: category.id },
+        data: { categoryId: clone.id },
+      });
+    }
+  }
+  for (const item of venues) await ensureDefaultCategories(prisma, item.id);
 }
 
 main()

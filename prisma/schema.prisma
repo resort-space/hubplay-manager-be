@@ -48,6 +48,11 @@ enum BillLineKind {
   discount
 }
 
+enum PricingUnit {
+  per_session
+  per_hour
+}
+
 model Venue {
   id        String   @id @default(cuid())
   code      String   @unique
@@ -66,6 +71,7 @@ model Venue {
   discounts DiscountCode[]
   cms       CmsContent?
   photos    UserPlayPhoto[]
+  categories GameCategory[]
 }
 
 model User {
@@ -89,10 +95,14 @@ model AdminUser {
 }
 
 model GameCategory {
-  id       String   @id @default(cuid())
-  kind     GameKind @unique
+  id       String    @id @default(cuid())
+  venueId  String
+  venue    Venue     @relation(fields: [venueId], references: [id])
+  billMode GameKind  @map("kind")
   name     String
   subGames SubGame[]
+  bills    Bill[]
+  @@unique([venueId, name])
 }
 
 model SubGame {
@@ -105,9 +115,11 @@ model SubGame {
   room       Room?        @relation(fields: [roomId], references: [id])
   name       String
   code       String
-  basePrice  Int
-  tags       String       @default("")
-  active     Boolean      @default(true)
+  basePrice   Int
+  pricingUnit PricingUnit @default(per_session)
+  tags        String      @default("")
+  active      Boolean     @default(true)
+  billLines   BillLine[]
   @@unique([venueId, code])
 }
 
@@ -185,6 +197,8 @@ model Receipt {
   booking         Booking?       @relation(fields: [bookingId], references: [id])
   phone           String
   guestName       String         @default("")
+  playTime        String         @default("")
+  playSession     String         @default("")
   paymentMethod   PaymentMethod?
   paymentStatus   PaymentStatus  @default(unpaid)
   createdAt       DateTime       @default(now())
@@ -193,10 +207,12 @@ model Receipt {
 }
 
 model Bill {
-  id            String        @id @default(cuid())
+  id            String         @id @default(cuid())
   receiptId     String
-  receipt       Receipt       @relation(fields: [receiptId], references: [id])
+  receipt       Receipt        @relation(fields: [receiptId], references: [id])
   type          BillType
+  categoryId    String?
+  category      GameCategory?  @relation(fields: [categoryId], references: [id])
   categoryKind  GameKind?
   total         Int
   lines         BillLine[]
@@ -210,6 +226,9 @@ model BillLine {
   description String
   qty         Int
   unitPrice   Int
+  subGameId   String?
+  subGame     SubGame? @relation(fields: [subGameId], references: [id])
+  playerCount Int?
 }
 
 model BillPaymentHistory {
