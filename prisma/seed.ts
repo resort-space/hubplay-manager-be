@@ -22,10 +22,10 @@ const slots = [
 async function main() {
   const venue = await prisma.venue.upsert({
     where: { code: 'DER' },
-    update: { name: 'Door Escape Room', address: '6 ngõ 78 đường Lương Ngọc Quyến' },
+    update: { name: 'Door Escape', address: '6 ngõ 78 đường Lương Ngọc Quyến' },
     create: {
       code: 'DER',
-      name: 'Door Escape Room',
+      name: 'Door Escape',
       address: '6 ngõ 78 đường Lương Ngọc Quyến',
       phone: '',
     },

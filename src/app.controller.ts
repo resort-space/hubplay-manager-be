@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -89,19 +90,39 @@ export class AppController {
     return { user: user ? { id: user.id, phone: user.phone, name: user.name, kind: 'user' } : null };
   }
 
+  @Get('venues')
+  venues(@Req() req: Request) {
+    return this.hub.listVenues(sessionOf(req));
+  }
+
+  @Post('venues')
+  createVenue(@Req() req: Request, @Body() body: { code: string; name: string; address: string; phone?: string }) {
+    return this.hub.createVenue(sessionOf(req), body);
+  }
+
+  @Patch('venues/:id')
+  patchVenue(@Req() req: Request, @Param('id') id: string, @Body() body: { code?: string; name?: string; address?: string; phone?: string; active?: boolean }) {
+    return this.hub.updateVenue(sessionOf(req), id, body);
+  }
+
+  @Delete('venues/:id')
+  removeVenue(@Req() req: Request, @Param('id') id: string) {
+    return this.hub.deleteVenue(sessionOf(req), id);
+  }
+
   @Get('home')
-  home() {
-    return this.hub.publicHome();
+  home(@Req() req: Request, @Query('venueId') venueId?: string) {
+    return this.hub.publicHome(sessionOf(req), venueId);
   }
 
   @Get('slots')
-  slots(@Query('roomId') roomId: string, @Query('date') date: string) {
-    return this.hub.slotsFor(roomId, date);
+  slots(@Req() req: Request, @Query('roomId') roomId: string, @Query('date') date: string, @Query('venueId') venueId?: string) {
+    return this.hub.slotsFor(roomId, date, sessionOf(req), venueId);
   }
 
   @Get('bookings')
-  bookings(@Req() req: Request, @Query('from') from: string, @Query('to') to: string) {
-    return this.hub.weekBookings(from, to, sessionOf(req));
+  bookings(@Req() req: Request, @Query('from') from: string, @Query('to') to: string, @Query('venueId') venueId?: string) {
+    return this.hub.weekBookings(from, to, sessionOf(req), venueId);
   }
 
   @Post('bookings')
@@ -117,10 +138,11 @@ export class AppController {
       phone: string;
       playerCount: number;
       note?: string;
+      venueId?: string;
     },
   ) {
     const session = sessionOf(req);
-    return this.hub.createBooking({ ...body, userId: session?.kind === 'user' ? session.sub : undefined });
+    return this.hub.createBooking({ ...body, userId: session?.kind === 'user' ? session.sub : undefined }, session);
   }
 
   @Post('bookings/:id/confirm')
@@ -139,23 +161,43 @@ export class AppController {
   }
 
   @Post('rooms')
-  saveRoom(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; capacity: number; description?: string; active?: boolean }) {
+  saveRoom(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; capacity: number; description?: string; active?: boolean; venueId?: string }) {
     return this.hub.saveRoom(sessionOf(req), body);
   }
 
+  @Delete('rooms/:id')
+  removeRoom(@Req() req: Request, @Param('id') id: string, @Query('venueId') venueId?: string) {
+    return this.hub.deleteRoom(sessionOf(req), id, venueId);
+  }
+
   @Post('sub-games')
-  saveGame(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; basePrice: number; kind: GameKind; roomId?: string; tags?: string; active?: boolean }) {
+  saveGame(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; basePrice: number; kind: GameKind; roomId?: string; tags?: string; active?: boolean; venueId?: string }) {
     return this.hub.saveSubGame(sessionOf(req), body);
   }
 
   @Post('drinks')
-  saveDrink(@Req() req: Request, @Body() body: { id?: string; name: string; price: number; active?: boolean }) {
+  saveDrink(@Req() req: Request, @Body() body: { id?: string; name: string; price: number; active?: boolean; venueId?: string }) {
     return this.hub.saveDrink(sessionOf(req), body);
   }
 
+  @Get('discounts')
+  discounts(@Req() req: Request, @Query('venueId') venueId?: string) {
+    return this.hub.listDiscounts(sessionOf(req), venueId);
+  }
+
+  @Post('discounts')
+  saveDiscount(@Req() req: Request, @Body() body: { id?: string; code: string; amount: number; venueId?: string }) {
+    return this.hub.saveDiscount(sessionOf(req), body);
+  }
+
+  @Delete('discounts/:id')
+  removeDiscount(@Req() req: Request, @Param('id') id: string, @Query('venueId') venueId?: string) {
+    return this.hub.deleteDiscount(sessionOf(req), id, venueId);
+  }
+
   @Post('cms')
-  cms(@Req() req: Request, @Body() body: { guide: string; priceNote: string; reviews: string }) {
-    return this.hub.saveCms(sessionOf(req), body.guide, body.priceNote, body.reviews);
+  cms(@Req() req: Request, @Body() body: { guide: string; priceNote: string; reviews: string; venueId?: string }) {
+    return this.hub.saveCms(sessionOf(req), body.guide, body.priceNote, body.reviews, body.venueId);
   }
 
   @Get('admins')
@@ -164,9 +206,9 @@ export class AppController {
   }
 
   @Post('admins')
-  async addAdmin(@Req() req: Request, @Body() body: { username: string; password: string; role: AdminRole }) {
+  async addAdmin(@Req() req: Request, @Body() body: { username: string; password: string; role: AdminRole; venueId: string }) {
     const passwordHash = await hash(body.password, 10);
-    return this.hub.createAdmin(sessionOf(req), body.username, passwordHash, body.role);
+    return this.hub.createAdmin(sessionOf(req), body.username, passwordHash, body.role, body.venueId);
   }
 
   @Post('receipts')
@@ -178,30 +220,31 @@ export class AppController {
       guestName?: string;
       bookingId?: string;
       paymentMethod: PaymentMethod;
-      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind }[];
+      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; code?: string }[];
+      venueId?: string;
     },
   ) {
     return this.hub.createReceipt(sessionOf(req), body);
   }
 
   @Get('receipts')
-  receipts(@Req() req: Request, @Query('date') date?: string) {
-    return this.hub.listReceipts(sessionOf(req), date);
+  receipts(@Req() req: Request, @Query('date') date?: string, @Query('venueId') venueId?: string) {
+    return this.hub.listReceipts(sessionOf(req), date, venueId);
   }
 
   @Get('revenue/day')
-  day(@Req() req: Request, @Query('date') date: string) {
-    return this.hub.dayRevenue(sessionOf(req), date);
+  day(@Req() req: Request, @Query('date') date: string, @Query('venueId') venueId?: string) {
+    return this.hub.dayRevenue(sessionOf(req), date, venueId);
   }
 
   @Post('revenue/close')
-  close(@Req() req: Request, @Body() body: { date: string }) {
-    return this.hub.closeDay(sessionOf(req), body.date);
+  close(@Req() req: Request, @Body() body: { date: string; venueId?: string }) {
+    return this.hub.closeDay(sessionOf(req), body.date, body.venueId);
   }
 
   @Get('revenue/summary')
-  summary(@Req() req: Request, @Query('year') year: string, @Query('period') period: string) {
-    return this.hub.summary(sessionOf(req), Number(year), period || 'year');
+  summary(@Req() req: Request, @Query('year') year: string, @Query('period') period: string, @Query('venueId') venueId?: string) {
+    return this.hub.summary(sessionOf(req), Number(year), period || 'year', venueId);
   }
 
   @Post('photos')
@@ -209,9 +252,9 @@ export class AppController {
   photo(
     @Req() req: Request,
     @UploadedFile() file: Express.Multer.File,
-    @Body() body: { phone: string; bookingId?: string; billId?: string; caption?: string },
+    @Body() body: { phone: string; bookingId?: string; billId?: string; caption?: string; venueId?: string },
   ) {
-    return this.hub.savePhoto(sessionOf(req), body.phone, file, body.bookingId, body.billId, body.caption);
+    return this.hub.savePhoto(sessionOf(req), body.phone, file, body.bookingId, body.billId, body.caption, body.venueId);
   }
 
   @Get('me')

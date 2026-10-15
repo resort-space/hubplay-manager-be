@@ -24,4 +24,4 @@ Tài khoản seed, mật khẩu `Admin@123`:
 
 OTP dev luôn là `000000` khi `OTP_DEV=true`.
 
-Cơ sở seed: Door Escape Room, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`.
+Cơ sở seed: Door Escape, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`.
