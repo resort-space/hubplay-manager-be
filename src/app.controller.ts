@@ -161,6 +161,15 @@ export class AppController {
     return this.hub.createBooking({ ...body, userId: session?.kind === 'user' ? session.sub : undefined }, session);
   }
 
+  @Patch('bookings/:id')
+  patchBooking(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() body: { guestName: string; phone: string; email?: string; playerCount: number },
+  ) {
+    return this.hub.updateBooking(id, { guestName: body.guestName, phone: body.phone, email: body.email || '', playerCount: body.playerCount }, sessionOf(req));
+  }
+
   @Post('bookings/:id/confirm')
   confirm(@Req() req: Request, @Param('id') id: string) {
     return this.hub.confirmBooking(id, sessionOf(req));

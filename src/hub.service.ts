@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { AdminRole, BillLineKind, BillType, BookingStatus, GameKind, PaymentMethod, PricingUnit, Prisma } from '@prisma/client';
 import { mkdir, writeFile } from 'fs/promises';
@@ -30,8 +31,13 @@ const defaultSlots = [
 ] as const;
 
 @Injectable()
-export class HubService {
+export class HubService implements OnModuleInit {
   constructor(private readonly prisma: PrismaService) {}
+
+  async onModuleInit() {
+    const venues = await this.prisma.venue.findMany({ select: { id: true } });
+    for (const venue of venues) await ensureDefaultCategories(this.prisma, venue.id);
+  }
 
   private async staffVenueId(session: SessionPayload) {
     if (session.role === AdminRole.system_admin) return null;
@@ -223,11 +229,14 @@ export class HubService {
         date: { gte: from, lte: to },
         status: { not: BookingStatus.cancelled },
       },
-      include: { room: true },
+      include: { room: true, _count: { select: { receipts: true } } },
       orderBy: [{ date: 'asc' }, { slotIndex: 'asc' }],
     });
-    if (session?.kind === 'admin') return rows;
-    return rows.map(({ phone, guestName, email, ...rest }) => ({ ...rest, phone: '', guestName: '', email: '' }));
+    return rows.map(({ _count, phone, guestName, email, ...rest }) => {
+      const paid = _count.receipts > 0;
+      if (session?.kind === 'admin') return { ...rest, phone, guestName, email, paid };
+      return { ...rest, phone: '', guestName: '', email: '', paid: false };
+    });
   }
 
   private assertConsecutive(indexes: number[]) {
@@ -300,24 +309,57 @@ export class HubService {
     const booking = await this.prisma.booking.findUnique({ where: { id }, include: { room: true } });
     if (!booking || booking.status !== BookingStatus.pending_confirm) throw new BadRequestException('Không thể giữ ca này');
     await this.assertRecordVenue(session!, booking.venueId);
-    const count = await this.prisma.booking.count({
+    return this.holdBooking(this.prisma, booking);
+  }
+
+  private holdBooking(
+    db: Prisma.TransactionClient | PrismaService,
+    booking: { id: string; roomId: string; date: string; slotIndex: number; room: { code: string } },
+  ) {
+    return db.booking.count({
       where: { roomId: booking.roomId, date: booking.date, slotIndex: booking.slotIndex, sessionCode: { not: null } },
-    });
-    const ymd = booking.date.replace(/-/g, '');
-    const sessionCode = `${booking.room.code}${ymd}${String(booking.slotIndex).padStart(2, '0')}${count + 1}`;
-    return this.prisma.booking.update({
-      where: { id },
-      data: { status: BookingStatus.confirmed, sessionCode },
-      include: { room: true },
+    }).then((count) => {
+      const ymd = booking.date.replace(/-/g, '');
+      const sessionCode = `${booking.room.code}${ymd}${String(booking.slotIndex).padStart(2, '0')}${count + 1}`;
+      return db.booking.update({
+        where: { id: booking.id },
+        data: { status: BookingStatus.confirmed, sessionCode },
+        include: { room: true },
+      });
     });
   }
 
   async cancelBooking(id: string, session: SessionPayload | null) {
     this.assertStaff(session, [AdminRole.counter_admin, AdminRole.system_admin, AdminRole.edit_admin]);
-    const booking = await this.prisma.booking.findUnique({ where: { id } });
+    const booking = await this.prisma.booking.findUnique({ where: { id }, include: { _count: { select: { receipts: true } } } });
     if (!booking || booking.status === BookingStatus.cancelled) throw new BadRequestException('Ca không còn để hủy');
+    if (booking._count.receipts > 0) throw new BadRequestException('Ca đã thanh toán, không hủy được');
     await this.assertRecordVenue(session!, booking.venueId);
     return this.prisma.booking.update({ where: { id }, data: { status: BookingStatus.cancelled } });
+  }
+
+  async updateBooking(
+    id: string,
+    input: { guestName: string; phone: string; email: string; playerCount: number },
+    session: SessionPayload | null,
+  ) {
+    this.assertStaff(session, [AdminRole.counter_admin, AdminRole.system_admin, AdminRole.edit_admin]);
+    const booking = await this.prisma.booking.findUnique({ where: { id }, include: { room: true, _count: { select: { receipts: true } } } });
+    if (!booking || booking.status === BookingStatus.cancelled) throw new BadRequestException('Ca không còn để sửa');
+    if (booking._count.receipts > 0) throw new BadRequestException('Ca đã thanh toán, không sửa được');
+    await this.assertRecordVenue(session!, booking.venueId);
+    const guestName = input.guestName.trim();
+    const phone = input.phone.trim();
+    if (!guestName) throw new BadRequestException('Nhập tên khách');
+    if (!phone) throw new BadRequestException('Nhập SĐT');
+    if (input.playerCount < 1 || input.playerCount > booking.room.capacity) {
+      throw new BadRequestException(`Số người từ 1 đến ${booking.room.capacity}`);
+    }
+    return this.prisma.booking.update({
+      where: { id },
+      data: { guestName, phone, email: input.email.trim(), playerCount: input.playerCount },
+      include: { room: true },
+    });
   }
 
   async updateSlot(id: string, startTime: string, endTime: string, enabled: boolean, session: SessionPayload | null) {
@@ -395,7 +437,7 @@ export class HubService {
     if (!existing && category.billMode === GameKind.escape && !data.roomId) throw new BadRequestException('Game đặt lịch thêm trong phòng Doors Escape');
     const roomId = data.roomId || existing?.roomId || null;
     await this.assertCodeFree(venue.id, code, { roomId: roomId || undefined, subGameId: existing?.id });
-    const pricingUnit = category.billMode === GameKind.board && data.pricingUnit === PricingUnit.per_hour ? PricingUnit.per_hour : PricingUnit.per_session;
+    const pricingUnit = PricingUnit.per_session;
     try {
       if (existing) {
         return await this.prisma.subGame.update({
@@ -440,7 +482,7 @@ export class HubService {
     const venue = await this.resolveVenue(staff, data.venueId);
     const name = data.name?.trim();
     if (!name) throw new BadRequestException('Nhập tên phòng');
-    if (data.billMode !== GameKind.board && data.billMode !== GameKind.sat) throw new BadRequestException('Chọn cách tính một lần hoặc theo giờ');
+    if (data.billMode !== GameKind.board) throw new BadRequestException('Phòng thêm không đặt lịch');
     try {
       return await this.prisma.gameCategory.create({ data: { venueId: venue.id, name, billMode: data.billMode } });
     } catch (error) {
@@ -586,7 +628,7 @@ export class HubService {
   ) {
     const staff = this.assertStaff(session, [AdminRole.counter_admin, AdminRole.system_admin, AdminRole.edit_admin]);
     const venue = await this.resolveVenue(staff, input.venueId);
-    if (!input.lines.length) throw new BadRequestException('Phiếu chưa có dòng');
+    if (!input.lines.length) throw new BadRequestException('Phiếu chưa có dữ liệu');
     const lines = await this.pricedLines(venue.id, input.lines);
     const gameLines = lines.filter((line) => line.ledger === 'game');
     const fnbLines = lines.filter((line) => line.ledger === 'fnb');
@@ -595,22 +637,26 @@ export class HubService {
     const parents = new Set(games.map((line) => line.categoryId).filter((id): id is string => Boolean(id)));
     if (modes.size > 1 || parents.size > 1) throw new BadRequestException('Một phiếu chỉ một phòng');
     const mode = [...modes][0];
-    const walkIn = Boolean(mode && mode !== GameKind.escape);
-    const playTime = walkIn ? (input.playTime || '').trim() : '';
-    const playSession = walkIn ? (input.playSession || '').trim() : '';
-    if (walkIn && games.length) {
-      if (!playTime) throw new BadRequestException('Nhập thời gian');
-      if (!playSession) throw new BadRequestException('Nhập ca chơi');
-    }
+    const playTime = games.length ? (input.playTime || '').trim() : '';
+    if (games.length && !playTime) throw new BadRequestException('Nhập thời gian');
+    const playSession = '';
     if (input.bookingId && mode && mode !== GameKind.escape) throw new BadRequestException('Phiếu phòng này không gắn ca');
     if (input.bookingId) {
-      const booking = await this.prisma.booking.findUnique({ where: { id: input.bookingId } });
+      const booking = await this.prisma.booking.findUnique({ where: { id: input.bookingId }, include: { _count: { select: { receipts: true } } } });
       if (!booking || booking.venueId !== venue.id) throw new BadRequestException('Ca không thuộc cơ sở này');
+      if (booking.status === BookingStatus.cancelled) throw new BadRequestException('Ca đã hủy');
+      if (booking._count.receipts > 0) throw new BadRequestException('Ca đã thanh toán');
     }
     const anchor = games[0];
     const sum = (rows: ReceiptLine[]) => rows.reduce((total, line) => total + line.qty * line.unitPrice, 0);
     const total = sum(lines);
     return this.prisma.$transaction(async (tx) => {
+      if (input.bookingId) {
+        const taken = await tx.receipt.findFirst({ where: { bookingId: input.bookingId }, select: { id: true } });
+        if (taken) throw new BadRequestException('Ca đã thanh toán');
+        const booking = await tx.booking.findUnique({ where: { id: input.bookingId }, include: { room: true } });
+        if (booking?.status === BookingStatus.pending_confirm) await this.holdBooking(tx, booking);
+      }
       const receipt = await tx.receipt.create({
         data: {
           venueId: venue.id,
@@ -694,13 +740,10 @@ export class HubService {
       }
       const playerCount = Number(line.playerCount);
       if (!Number.isInteger(playerCount) || playerCount < 1) throw new BadRequestException('Nhập số người');
-      const hourly = game.pricingUnit === PricingUnit.per_hour;
-      const qty = hourly ? Math.floor(Number(line.qty)) : 1;
-      if (!Number.isInteger(qty) || qty < 1) throw new BadRequestException('Nhập số giờ');
       priced.push({
         kind: BillLineKind.subgame,
         description: `${game.name} · ${playerCount} người`,
-        qty,
+        qty: 1,
         unitPrice: game.basePrice,
         ledger: 'game',
         categoryId: game.categoryId,
@@ -786,6 +829,10 @@ export class HubService {
     const defaultByMode = new Map<GameKind, string>();
     for (const category of categories) {
       if (!defaultByMode.has(category.billMode)) defaultByMode.set(category.billMode, category.id);
+    }
+    if (!defaultByMode.has(GameKind.sat)) {
+      const satRoom = categories.find((category) => category.name === 'Kịch bản sát') || categories.find((category) => category.billMode === GameKind.board);
+      if (satRoom) defaultByMode.set(GameKind.sat, satRoom.id);
     }
     let fnb = 0;
     let game = 0;
