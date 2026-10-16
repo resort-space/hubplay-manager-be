@@ -37,3 +37,69 @@ QZ Tray báo **Untrusted website** và **Invalid certificate** khi chưa cài ch
 5. Tải lại trang quầy, bấm **Lưu và in**. Tick **Remember** rồi bấm **Allow**.
 
 QZ Tray phải đang chạy. Web tìm máy có tên **XP-T80L** hoặc **Xprinter**, không có thì dùng máy in mặc định. Không chọn máy in trong QZ.
+
+
+## In phiếu trên VPS
+
+VPS không nối tới QZ Tray và không nối tới máy in. Trình duyệt trên máy quầy nối vào QZ Tray đang chạy trên chính máy đó (`wss://localhost:8181`). Nest chỉ ký yêu cầu khi admin đã đăng nhập.
+
+Trang quầy phải là **HTTPS**. Đang mở bằng `http://` thì `qz-tray.js` bỏ cổng 8181 và chỉ thử `ws://localhost:8182`. Chrome còn chặn trang công cộng gọi `localhost`, log dạng `ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`. Domain tạm `*.sslip.io` của Coolify thường là HTTP, và Let's Encrypt hay từ chối chứng chỉ vì quá nhiều site dùng chung `sslip.io`. Khi có tên miền riêng, trỏ bản ghi A về IP VPS, rồi trong Coolify (service frontend) đổi ô Domains thành `https://tên-miền`. Save để proxy xin chứng chỉ. Mở trang quầy bằng địa chỉ có ổ khóa.
+
+### Giữ một cặp khóa
+
+Trong Coolify, service backend, mục Storages, thêm volume. Destination Path: `/app/qz`. Deploy lại.
+
+Terminal của service backend:
+
+```
+pwd
+ls -la /app/qz
+```
+
+`pwd` phải là `/app`. Nếu là thư mục khác thì Destination Path là thư mục đó cộng `/qz`.
+
+Thư mục trống thì lần in đầu server tự sinh cặp khóa mới. Muốn dùng đúng cặp đang có trên máy dev, dán file vào trước khi ai bấm in. Không copy `private-key.pem` ra máy quầy.
+
+```
+cat > /app/qz/certificate.pem
+cat > /app/qz/private-key.pem
+```
+
+Mỗi lệnh: dán nội dung, Enter, rồi `Ctrl+D`. Kiểm tra dòng đầu:
+
+```
+head -n 1 /app/qz/certificate.pem /app/qz/private-key.pem
+```
+
+Phải thấy `-----BEGIN CERTIFICATE-----` và `-----BEGIN PRIVATE KEY-----` (hoặc `BEGIN RSA PRIVATE KEY`).
+
+Volume còn thì các lần deploy sau giữ nguyên cặp khóa. Volume trống lúc app khởi động sẽ sinh chứng chỉ khác và `override.crt` cũ hết dùng.
+
+### Máy quầy
+
+1. Copy `certificate.pem` (trong container hoặc bản local cùng cặp), lưu thành `override.crt`.
+2. Dán vào `C:\Program Files\QZ Tray\`. Windows không cho ghi thì dán vào `%AppData%\qz\`.
+3. Exit QZ Tray rồi mở lại.
+4. So khớp với chứng chỉ server. Hai mã phải giống nhau:
+
+```
+openssl x509 -in /app/qz/certificate.pem -noout -fingerprint -sha256
+```
+
+Trên máy quầy:
+
+```
+certutil -dump "$env:ProgramFiles\QZ Tray\override.crt" | findstr "Cert Hash(sha256)"
+```
+
+`certutil -hashfile` băm cả file nên không dùng để so với `openssl`.
+
+5. QZ Tray đang chạy ở khay hệ thống. Mở trang quầy **HTTPS** trên Chrome của máy quầy. Ổ khóa → Cài đặt trang → **Quyền truy cập mạng cục bộ** → **Cho phép**. Bấm **Lưu và in**, tick **Remember**, bấm **Allow**.
+
+Console phải có dòng `wss://localhost:8181`. Chỉ thấy `ws://` thì trang vẫn là HTTP.
+
+### Test khi chưa có tên miền
+
+Chỉ làm trên Chrome của máy quầy. Mở `chrome://flags/#local-network-access-check`, chọn **Disabled**, bấm **Relaunch**. QZ Tray đang chạy, rồi in từ đúng URL HTTP hiện tại (kể cả `http://….sslip.io`).
+
+Cờ này tắt chặn của Chrome trên máy đó. Khi site đã là HTTPS, trả cờ về **Default** và cho phép quyền truy cập mạng cục bộ cho địa chỉ HTTPS.
