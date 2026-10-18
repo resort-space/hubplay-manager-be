@@ -53,6 +53,11 @@ enum PricingUnit {
   per_hour
 }
 
+enum MenuKind {
+  drink
+  food
+}
+
 model Venue {
   id        String   @id @default(cuid())
   code      String   @unique
@@ -75,22 +80,24 @@ model Venue {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  phone     String   @unique
-  name      String   @default("")
-  email     String   @default("")
-  bookings  Booking[]
-  photos    UserPlayPhoto[]
+  id           String   @id @default(cuid())
+  phone        String   @unique
+  name         String   @default("")
+  email        String   @default("")
+  passwordHash String   @default("")
+  bookings     Booking[]
+  photos       UserPlayPhoto[]
 }
 
 model AdminUser {
-  id           String    @id @default(cuid())
-  username     String    @unique
+  id           String      @id @default(cuid())
+  name         String      @default("")
+  username     String      @unique
   passwordHash String
-  role         AdminRole
-  active       Boolean   @default(true)
+  roles        AdminRole[]
+  active       Boolean     @default(true)
   venueId      String?
-  venue        Venue?    @relation(fields: [venueId], references: [id])
+  venue        Venue?      @relation(fields: [venueId], references: [id])
   createdById  String?
 }
 
@@ -113,9 +120,13 @@ model SubGame {
   category   GameCategory @relation(fields: [categoryId], references: [id])
   roomId     String?
   room       Room?        @relation(fields: [roomId], references: [id])
-  name       String
-  code       String
+  name        String
+  code        String
   basePrice   Int
+  nightPrice  Int         @default(0)
+  minPlayers  Int         @default(1)
+  maxPlayers  Int         @default(1)
+  duration    String      @default("")
   pricingUnit PricingUnit @default(per_session)
   tags        String      @default("")
   active      Boolean     @default(true)
@@ -164,6 +175,7 @@ model Booking {
   guestName    String        @default("")
   email        String        @default("")
   note         String        @default("")
+  cancelNote   String        @default("")
   status       BookingStatus @default(pending_confirm)
   createdBy    String        @default("user")
   createdAt    DateTime      @default(now())
@@ -175,18 +187,19 @@ model DiscountCode {
   venueId  String
   venue    Venue   @relation(fields: [venueId], references: [id])
   code     String
-  amount   Int
+  percent  Int
   active   Boolean @default(true)
   @@unique([venueId, code])
 }
 
 model Drink {
-  id      String  @id @default(cuid())
+  id      String   @id @default(cuid())
   venueId String
-  venue   Venue   @relation(fields: [venueId], references: [id])
+  venue   Venue    @relation(fields: [venueId], references: [id])
   name    String
   price   Int
-  active  Boolean @default(true)
+  kind    MenuKind @default(drink)
+  active  Boolean  @default(true)
 }
 
 model Receipt {

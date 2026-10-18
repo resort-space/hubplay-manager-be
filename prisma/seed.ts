@@ -82,8 +82,8 @@ async function main() {
 
   await prisma.discountCode.upsert({
     where: { venueId_code: { venueId: venue.id, code: 'HUB10' } },
-    update: { amount: 50000, active: true },
-    create: { venueId: venue.id, code: 'HUB10', amount: 50000 },
+    update: { percent: 10, active: true },
+    create: { venueId: venue.id, code: 'HUB10', percent: 10 },
   });
 
   await prisma.cmsContent.upsert({
@@ -98,15 +98,15 @@ async function main() {
   });
 
   const passwordHash = await hash('Admin@123', 10);
-  const admins: { username: string; role: AdminRole; venueId: string | null }[] = [
-    { username: 'sysadmin', role: AdminRole.system_admin, venueId: null },
-    { username: 'editadmin', role: AdminRole.edit_admin, venueId: venue.id },
-    { username: 'quay', role: AdminRole.counter_admin, venueId: venue.id },
+  const admins: { username: string; name: string; roles: AdminRole[]; venueId: string | null }[] = [
+    { username: 'sysadmin', name: 'System admin', roles: [AdminRole.system_admin], venueId: null },
+    { username: 'editadmin', name: 'Edit admin', roles: [AdminRole.edit_admin], venueId: venue.id },
+    { username: 'quay', name: 'Admin quầy', roles: [AdminRole.counter_admin], venueId: venue.id },
   ];
   for (const admin of admins) {
     await prisma.adminUser.upsert({
       where: { username: admin.username },
-      update: { role: admin.role, venueId: admin.venueId, active: true },
+      update: { name: admin.name, roles: admin.roles, venueId: admin.venueId, active: true },
       create: { ...admin, passwordHash },
     });
   }

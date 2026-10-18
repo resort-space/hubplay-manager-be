@@ -94,7 +94,7 @@ CREATE TABLE "DiscountCode" (
   id TEXT PRIMARY KEY,
   "venueId" TEXT NOT NULL REFERENCES "Venue"(id),
   code TEXT NOT NULL,
-  amount INTEGER NOT NULL,
+  percent INTEGER NOT NULL,
   active BOOLEAN NOT NULL DEFAULT true,
   UNIQUE ("venueId", code)
 );

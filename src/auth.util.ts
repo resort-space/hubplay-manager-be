@@ -5,8 +5,19 @@ export type SessionPayload = {
   sub: string;
   kind: 'user' | 'admin';
   role?: AdminRole;
+  roles?: AdminRole[];
   phone?: string;
 };
+
+export function sessionRoles(session: SessionPayload | null): AdminRole[] {
+  if (session?.roles?.length) return session.roles;
+  if (session?.role) return [session.role];
+  return [];
+}
+
+export function isSystemAdmin(session: SessionPayload | null) {
+  return sessionRoles(session).includes(AdminRole.system_admin);
+}
 
 const secret = () => process.env.JWT_SECRET || 'hubplay-dev-secret';
 

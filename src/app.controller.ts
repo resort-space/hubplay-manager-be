@@ -17,7 +17,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { AdminRole, BillLineKind, GameKind, PaymentMethod, PricingUnit } from '@prisma/client';
-import { compare, hash } from 'bcryptjs';
+import { compare } from 'bcryptjs';
 import type { Request, Response } from 'express';
 import { HubService } from './hub.service';
 import { PrismaService } from './prisma.service';
@@ -49,14 +49,21 @@ export class AppController {
     return { ok: true };
   }
 
-  @Post('auth/otp')
-  otp(@Body() body: { phone: string }) {
-    return this.hub.requestOtp(body.phone);
+  @Post('auth/register')
+  register(@Body() body: { name?: string; phone?: string; password?: string }) {
+    return this.hub.startRegister(body.name || '', body.phone || '', body.password || '');
   }
 
   @Post('auth/verify')
-  async verify(@Body() body: { phone: string; code: string; name?: string; email?: string }, @Res({ passthrough: true }) res: Response) {
-    const user = await this.hub.verifyOtp(body.phone, body.code, body.name, body.email);
+  async verify(@Body() body: { phone?: string; code?: string }, @Res({ passthrough: true }) res: Response) {
+    const user = await this.hub.confirmRegister(body.phone || '', body.code || '');
+    setCookie(res, signSession({ sub: user.id, kind: 'user', phone: user.phone }));
+    return { id: user.id, phone: user.phone, name: user.name };
+  }
+
+  @Post('auth/login')
+  async login(@Body() body: { phone?: string; password?: string }, @Res({ passthrough: true }) res: Response) {
+    const user = await this.hub.loginUser(body.phone || '', body.password || '');
     setCookie(res, signSession({ sub: user.id, kind: 'user', phone: user.phone }));
     return { id: user.id, phone: user.phone, name: user.name };
   }
@@ -67,8 +74,8 @@ export class AppController {
     if (!admin || !admin.active || !(await compare(body.password, admin.passwordHash))) {
       throw new UnauthorizedException('Sai tài khoản');
     }
-    setCookie(res, signSession({ sub: admin.id, kind: 'admin', role: admin.role }));
-    return { id: admin.id, username: admin.username, role: admin.role };
+    setCookie(res, signSession({ sub: admin.id, kind: 'admin', roles: admin.roles }));
+    return { id: admin.id, username: admin.username, name: admin.name, roles: admin.roles };
   }
 
   @Post('auth/logout')
@@ -98,7 +105,7 @@ export class AppController {
     if (session.kind === 'admin') {
       const admin = await this.prisma.adminUser.findUnique({
         where: { id: session.sub },
-        select: { id: true, username: true, role: true },
+        select: { id: true, username: true, name: true, roles: true },
       });
       return { user: admin ? { ...admin, kind: 'admin' } : null };
     }
@@ -176,8 +183,8 @@ export class AppController {
   }
 
   @Post('bookings/:id/cancel')
-  cancel(@Req() req: Request, @Param('id') id: string) {
-    return this.hub.cancelBooking(id, sessionOf(req));
+  cancel(@Req() req: Request, @Param('id') id: string, @Body() body: { note?: string }) {
+    return this.hub.cancelBooking(id, sessionOf(req), body.note || '');
   }
 
   @Patch('slots/:id')
@@ -196,7 +203,7 @@ export class AppController {
   }
 
   @Post('sub-games')
-  saveGame(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; basePrice: number; kind?: GameKind; categoryId?: string; pricingUnit?: PricingUnit; roomId?: string; tags?: string; active?: boolean; venueId?: string }) {
+  saveGame(@Req() req: Request, @Body() body: { id?: string; name: string; code: string; basePrice: number; kind?: GameKind; categoryId?: string; pricingUnit?: PricingUnit; roomId?: string; tags?: string; active?: boolean; venueId?: string; minPlayers?: number; maxPlayers?: number; duration?: string; nightPrice?: number }) {
     return this.hub.saveSubGame(sessionOf(req), body);
   }
 
@@ -226,8 +233,13 @@ export class AppController {
   }
 
   @Post('drinks')
-  saveDrink(@Req() req: Request, @Body() body: { id?: string; name: string; price: number; active?: boolean; venueId?: string }) {
+  saveDrink(@Req() req: Request, @Body() body: { id?: string; name: string; price: number; active?: boolean; venueId?: string; kind?: string }) {
     return this.hub.saveDrink(sessionOf(req), body);
+  }
+
+  @Delete('drinks/:id')
+  removeDrink(@Req() req: Request, @Param('id') id: string, @Query('venueId') venueId?: string) {
+    return this.hub.deleteDrink(sessionOf(req), id, venueId);
   }
 
   @Get('discounts')
@@ -236,7 +248,7 @@ export class AppController {
   }
 
   @Post('discounts')
-  saveDiscount(@Req() req: Request, @Body() body: { id?: string; code: string; amount: number; venueId?: string }) {
+  saveDiscount(@Req() req: Request, @Body() body: { id?: string; code: string; percent: number; venueId?: string }) {
     return this.hub.saveDiscount(sessionOf(req), body);
   }
 
@@ -256,9 +268,18 @@ export class AppController {
   }
 
   @Post('admins')
-  async addAdmin(@Req() req: Request, @Body() body: { username: string; password: string; role: AdminRole; venueId: string }) {
-    const passwordHash = await hash(body.password, 10);
-    return this.hub.createAdmin(sessionOf(req), body.username, passwordHash, body.role, body.venueId);
+  addAdmin(@Req() req: Request, @Body() body: { name?: string; username?: string; password?: string; roles?: AdminRole[]; venueId?: string }) {
+    return this.hub.createAdmin(sessionOf(req), body);
+  }
+
+  @Patch('admins/:id')
+  updateAdmin(@Req() req: Request, @Param('id') id: string, @Body() body: { name?: string; username?: string; password?: string; roles?: AdminRole[]; venueId?: string }) {
+    return this.hub.updateAdmin(sessionOf(req), id, body);
+  }
+
+  @Delete('admins/:id')
+  removeAdmin(@Req() req: Request, @Param('id') id: string) {
+    return this.hub.deleteAdmin(sessionOf(req), id);
   }
 
   @Post('receipts')
@@ -272,7 +293,7 @@ export class AppController {
       playTime?: string;
       playSession?: string;
       paymentMethod: PaymentMethod;
-      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; categoryId?: string; subGameId?: string; playerCount?: number; code?: string }[];
+      lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; categoryId?: string; subGameId?: string; playerCount?: number; code?: string; shift?: 'day' | 'night' }[];
       venueId?: string;
     },
   ) {
@@ -312,6 +333,11 @@ export class AppController {
   @Get('me')
   meData(@Req() req: Request) {
     return this.hub.myData(sessionOf(req));
+  }
+
+  @Patch('me')
+  patchMe(@Req() req: Request, @Body() body: { name?: string; email?: string; password?: string }) {
+    return this.hub.updateProfile(sessionOf(req), body.name || '', body.email || '', body.password || '');
   }
 
   @Post('contact')
