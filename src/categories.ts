@@ -74,6 +74,25 @@ export async function ensureDefaultCategories(db: Db, venueId: string) {
   });
 }
 
+export async function syncDefaultSatGames(db: Db, venueId: string) {
+  let updated = 0;
+  for (const game of defaultSatGames) {
+    const result = await db.subGame.updateMany({
+      where: { venueId, code: game.code },
+      data: {
+        name: game.name,
+        basePrice: game.basePrice,
+        nightPrice: game.nightPrice,
+        minPlayers: game.minPlayers,
+        maxPlayers: game.maxPlayers,
+        duration: game.duration,
+      },
+    });
+    updated += result.count;
+  }
+  return updated;
+}
+
 export async function ensureEscapeCategory(db: Db, venueId: string) {
   const found = await db.gameCategory.findFirst({
     where: { venueId, billMode: GameKind.escape },

@@ -187,6 +187,11 @@ export class AppController {
     return this.hub.cancelBooking(id, sessionOf(req), body.note || '');
   }
 
+  @Post('slots')
+  addSlot(@Req() req: Request, @Body() body: { startTime: string; endTime: string; venueId?: string }) {
+    return this.hub.createSlot(sessionOf(req), body);
+  }
+
   @Patch('slots/:id')
   patchSlot(@Req() req: Request, @Param('id') id: string, @Body() body: { startTime: string; endTime: string; enabled?: boolean }) {
     return this.hub.updateSlot(id, body.startTime, body.endTime, body.enabled ?? true, sessionOf(req));

@@ -26,6 +26,14 @@ OTP xác nhận SĐT lúc đăng ký luôn là `000000` khi `OTP_DEV=true`.
 
 Cơ sở seed: Door Escape, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`.
 
+Sửa tên hoặc giá trong `src/categories.ts` (`defaultSatGames`) và giá trong `src/menu.ts` (`defaultMenu`) rồi đẩy vào database đang dùng:
+
+```
+npm run db:sync-catalog
+```
+
+Lệnh ghi lại kịch bản còn mã `SAT-01` … `SAT-21` (tên, giá ngày, giá đêm, số người, thời gian) và giá món còn đúng loại với tên. Món hoặc kịch bản đã xóa giữ nguyên. Hai món Khoai tây chiên khác giá không bị lệnh này đổi. Không chạy lúc deploy.
+
 In phiếu qua QZ Tray cần chứng chỉ ký. Lần đầu gọi `/api/v1/qz/certificate` hoặc `/api/v1/qz/sign`, server tạo cặp khóa trong thư mục `qz/` (đã nằm trong `.gitignore`). Khóa riêng không đưa lên git. Chỉ admin đã đăng nhập mới lấy chứng chỉ và chữ ký.
 
 QZ Tray báo **Untrusted website** và **Invalid certificate** khi chưa cài chứng chỉ này. Trên máy quầy:

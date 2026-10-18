@@ -3,7 +3,6 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-  OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
 import { AdminRole, BillLineKind, BillType, BookingStatus, GameKind, MenuKind, PaymentMethod, PricingUnit, Prisma } from '@prisma/client';
@@ -43,16 +42,8 @@ const adminSelect = {
 } as const;
 
 @Injectable()
-export class HubService implements OnModuleInit {
+export class HubService {
   constructor(private readonly prisma: PrismaService) {}
-
-  async onModuleInit() {
-    const venues = await this.prisma.venue.findMany({ select: { id: true } });
-    for (const venue of venues) {
-      await ensureDefaultCategories(this.prisma, venue.id);
-      await ensureDefaultMenu(this.prisma, venue.id);
-    }
-  }
 
   private async staffVenueId(session: SessionPayload) {
     if (isSystemAdmin(session)) return null;
@@ -433,12 +424,28 @@ export class HubService implements OnModuleInit {
     });
   }
 
+  async createSlot(session: SessionPayload | null, data: { startTime: string; endTime: string; venueId?: string }) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const venue = await this.resolveVenue(staff, data.venueId);
+    const startTime = slotClock(data.startTime);
+    const endTime = slotClock(data.endTime);
+    const last = await this.prisma.timeSlot.findFirst({ where: { venueId: venue.id }, orderBy: { slotIndex: 'desc' } });
+    const slotIndex = (last?.slotIndex ?? 0) + 1;
+    if (slotIndex > 99) throw new BadRequestException('Tối đa 99 ca');
+    try {
+      return await this.prisma.timeSlot.create({ data: { venueId: venue.id, slotIndex, startTime, endTime, enabled: true } });
+    } catch (error) {
+      if (isUnique(error)) throw new BadRequestException('Ca vừa được thêm, thử lại');
+      throw error;
+    }
+  }
+
   async updateSlot(id: string, startTime: string, endTime: string, enabled: boolean, session: SessionPayload | null) {
     const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
     const slot = await this.prisma.timeSlot.findUnique({ where: { id } });
     if (!slot) throw new NotFoundException('Không thấy ca');
     await this.assertRecordVenue(staff, slot.venueId);
-    return this.prisma.timeSlot.update({ where: { id }, data: { startTime, endTime, enabled } });
+    return this.prisma.timeSlot.update({ where: { id }, data: { startTime: slotClock(startTime), endTime: slotClock(endTime), enabled } });
   }
 
   async saveRoom(session: SessionPayload | null, data: { id?: string; name: string; code: string; capacity: number; description?: string; active?: boolean; venueId?: string }) {
@@ -1146,6 +1153,12 @@ type ReceiptLine = {
 
 function isUnique(error: unknown) {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
+
+function slotClock(value: string) {
+  const time = value?.trim() || '';
+  if (!/^([01]\d|2[0-3]):[0-5]\d$|^24:00$/.test(time)) throw new BadRequestException('Giờ dạng HH:mm, ví dụ 09:00 hoặc 24:00');
+  return time;
 }
 
 function satGameFields(data: { basePrice: number; minPlayers?: number; maxPlayers?: number; duration?: string; nightPrice?: number }) {

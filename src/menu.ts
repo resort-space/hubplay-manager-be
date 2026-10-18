@@ -42,3 +42,28 @@ export async function ensureDefaultMenu(db: Db, venueId: string) {
     data: missing.map((item) => ({ venueId, kind: item.kind, name: item.name, price: item.price })),
   });
 }
+
+export async function syncDefaultMenuPrices(db: Db, venueId: string) {
+  const prices = new Map<string, { kind: MenuKind; name: string; values: number[] }>();
+  for (const item of defaultMenu) {
+    const key = `${item.kind}\0${item.name}`;
+    const row = prices.get(key) ?? { kind: item.kind, name: item.name, values: [] };
+    row.values.push(item.price);
+    prices.set(key, row);
+  }
+  let updated = 0;
+  const skipped: string[] = [];
+  for (const row of prices.values()) {
+    const unique = [...new Set(row.values)];
+    if (unique.length !== 1) {
+      skipped.push(row.name);
+      continue;
+    }
+    const result = await db.drink.updateMany({
+      where: { venueId, kind: row.kind, name: row.name },
+      data: { price: unique[0] },
+    });
+    updated += result.count;
+  }
+  return { updated, skipped };
+}

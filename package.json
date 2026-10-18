@@ -9,6 +9,7 @@
     "prisma:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
+    "db:sync-catalog": "tsx scripts/sync-catalog.ts",
     "db:up": "tsx scripts/dev-db.ts"
   },
   "dependencies": {
