@@ -16,15 +16,33 @@ npm run build
 node dist/main.js
 ```
 
-Tài khoản seed, mật khẩu `Admin@123`:
-
-- `sysadmin` — system-admin
-- `editadmin` — edit-admin
-- `quay` — admin quầy
+Tài khoản seed `sysadmin` (system-admin), `editadmin` (edit-admin), `quay` (admin quầy) dùng chung mật khẩu `SEED_ADMIN_PASSWORD`. Đặt biến này trên service backend (Coolify) hoặc trong `.env` local. Thiếu hoặc để trống thì `db:seed` dừng, không tạo tài khoản.
 
 OTP xác nhận SĐT lúc đăng ký luôn là `000000` khi `OTP_DEV=true`.
 
-Cơ sở seed: Door Escape, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`.
+Cơ sở seed: Door Escape, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`. Seed còn 13 ca, 3 nhóm game, kịch bản `SAT-01` … `SAT-21` nếu chưa có mã, 2 phòng escape (`R1`, `R2`), mã `HUB10`, nội dung trang chủ, và các món còn thiếu trong `defaultMenu` (đồ uống và đồ ăn). Món đã có cùng loại, tên và giá giữ nguyên. Món không nằm trong danh sách đó, kể cả món đã xóa, không bị seed đụng.
+
+Database Postgres mới (service backend trên Coolify vừa trỏ `DATABASE_URL` trống): mở terminal của đúng service backend, không chạy ở máy local và không chạy trong service frontend. `pwd` phải là thư mục có `package.json` và `prisma/schema.prisma` (thường là `/app`). Chạy lần lượt, vì seed cần bảng đã có:
+
+```
+cd /app
+npm run db:push
+npm run db:seed
+```
+
+`db:push` tạo bảng theo schema. `db:seed` ghi dữ liệu mặc định ở trên. Image production bỏ devDependencies thì `prisma` hoặc `tsx` không có trong `node_modules`. Chạy thay:
+
+```
+npx prisma db push
+npx tsx prisma/seed.ts
+```
+
+Chạy lại `db:seed` trên database đã có dữ liệu không đưa về gốc. Seed chỉ thêm hoặc sửa vài dòng mặc định, thêm món `defaultMenu` còn thiếu, và hash lại rồi ghi đè mật khẩu `sysadmin`, `editadmin`, `quay` theo `SEED_ADMIN_PASSWORD`. Lịch đặt, hóa đơn, món đã có, khách và tài khoản admin khác vẫn còn. Muốn xóa hết rồi seed lại: cùng terminal service backend, cùng thư mục app. Lệnh đầu xóa toàn bộ bảng và dữ liệu của `DATABASE_URL` đó, rồi tạo lại schema. Prisma hỏi thì gõ `y`. Ảnh trong volume `uploads` không bị xóa. Ba tài khoản seed sau đó nhận mật khẩu đang có trong `SEED_ADMIN_PASSWORD`.
+
+```
+npx prisma db push --force-reset --accept-data-loss
+npx tsx prisma/seed.ts
+```
 
 Sửa tên hoặc giá trong `src/categories.ts` (`defaultSatGames`) và giá trong `src/menu.ts` (`defaultMenu`) rồi đẩy vào database đang dùng:
 
@@ -46,7 +64,6 @@ QZ Tray báo **Untrusted website** và **Invalid certificate** khi chưa cài ch
 
 QZ Tray phải đang chạy. Web tìm máy có tên **XP-T80L** hoặc **Xprinter**, không có thì dùng máy in mặc định. Không chọn máy in trong QZ.
 
-
 ## In phiếu trên VPS
 
 VPS không nối tới QZ Tray và không nối tới máy in. Trình duyệt trên máy quầy nối vào QZ Tray đang chạy trên chính máy đó (`wss://localhost:8181`). Nest chỉ ký yêu cầu khi admin đã đăng nhập.
@@ -65,6 +82,8 @@ ls -la /app/qz
 ```
 
 `pwd` phải là `/app`. Nếu là thư mục khác thì Destination Path là thư mục đó cộng `/qz`.
+
+Tạo folder nếu chưa có: mkdir /app/qz
 
 Thư mục trống thì lần in đầu server tự sinh cặp khóa mới. Muốn dùng đúng cặp đang có trên máy dev, dán file vào trước khi ai bấm in. Không copy `private-key.pem` ra máy quầy.
 

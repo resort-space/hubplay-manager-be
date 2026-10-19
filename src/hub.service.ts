@@ -911,10 +911,7 @@ export class HubService {
         if (priced.some((row) => row.kind === BillLineKind.subgame)) throw new BadRequestException('Một phiếu một kịch bản');
         const shift = line.shift === 'night' ? 'night' : line.shift === 'day' ? 'day' : '';
         if (!shift) throw new BadRequestException('Chọn ca ngày hoặc ca đêm');
-        if (playerCount < game.minPlayers || playerCount > game.maxPlayers) {
-          const limit = game.minPlayers === game.maxPlayers ? `${game.minPlayers} người` : `${game.minPlayers}–${game.maxPlayers} người`;
-          throw new BadRequestException(`Kịch bản này ${limit}`);
-        }
+        if (playerCount > game.maxPlayers) throw new BadRequestException(`Kịch bản này tối đa ${game.maxPlayers} người`);
         const unitPrice = shift === 'night' ? game.nightPrice : game.basePrice;
         const duration = game.duration ? ` · ${game.duration}` : '';
         const price = new Intl.NumberFormat('vi-VN').format(unitPrice);

@@ -1,6 +1,33 @@
+import { existsSync, readFileSync } from 'fs';
+import { resolve } from 'path';
 import { PrismaClient, AdminRole, GameKind } from '@prisma/client';
 import { hash } from 'bcryptjs';
 import { ensureDefaultCategories } from '../src/categories';
+import { ensureDefaultMenu } from '../src/menu';
+
+function loadEnvFile() {
+  const path = resolve(process.cwd(), '.env');
+  if (!existsSync(path)) return;
+  for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+loadEnvFile();
+const seedPassword = process.env.SEED_ADMIN_PASSWORD?.trim() ?? '';
+if (!seedPassword) {
+  console.error('Thiếu SEED_ADMIN_PASSWORD');
+  process.exit(1);
+}
 
 const prisma = new PrismaClient();
 
@@ -71,14 +98,7 @@ async function main() {
     });
   }
 
-  const drinks = [
-    ['Nước suối', 15000],
-    ['Trà đào', 35000],
-  ] as const;
-  for (const [name, price] of drinks) {
-    const exists = await prisma.drink.findFirst({ where: { venueId: venue.id, name } });
-    if (!exists) await prisma.drink.create({ data: { venueId: venue.id, name, price } });
-  }
+  await ensureDefaultMenu(prisma, venue.id);
 
   await prisma.discountCode.upsert({
     where: { venueId_code: { venueId: venue.id, code: 'HUB10' } },
@@ -97,7 +117,7 @@ async function main() {
     },
   });
 
-  const passwordHash = await hash('Admin@123', 10);
+  const passwordHash = await hash(seedPassword, 10);
   const admins: { username: string; name: string; roles: AdminRole[]; venueId: string | null }[] = [
     { username: 'sysadmin', name: 'System admin', roles: [AdminRole.system_admin], venueId: null },
     { username: 'editadmin', name: 'Edit admin', roles: [AdminRole.edit_admin], venueId: venue.id },
@@ -106,7 +126,7 @@ async function main() {
   for (const admin of admins) {
     await prisma.adminUser.upsert({
       where: { username: admin.username },
-      update: { name: admin.name, roles: admin.roles, venueId: admin.venueId, active: true },
+      update: { name: admin.name, roles: admin.roles, venueId: admin.venueId, active: true, passwordHash },
       create: { ...admin, passwordHash },
     });
   }
