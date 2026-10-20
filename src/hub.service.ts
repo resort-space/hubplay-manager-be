@@ -991,22 +991,29 @@ export class HubService {
       },
       include: { bills: true, payments: true },
     });
-    const closed = await this.prisma.dayClose.findUnique({ where: { venueId_date: { venueId: venue.id, date } } });
-    let game = 0;
-    let fnb = 0;
+    const [closed, categories] = await Promise.all([
+      this.prisma.dayClose.findUnique({ where: { venueId_date: { venueId: venue.id, date } } }),
+      this.prisma.gameCategory.findMany({ where: { venueId: venue.id }, orderBy: { id: 'asc' } }),
+    ]);
+    const rooms = tallyRooms(categories, receipts.flatMap((receipt) => receipt.bills));
     let cash = 0;
     let transfer = 0;
     for (const r of receipts) {
-      for (const b of r.bills) {
-        if (b.type === 'game') game += b.total;
-        else fnb += b.total;
-      }
       for (const p of r.payments) {
         if (p.method === 'cash') cash += p.amount;
         else transfer += p.amount;
       }
     }
-    return { date, game, fnb, cash, transfer, total: game + fnb, closed: Boolean(closed) };
+    return {
+      date,
+      game: rooms.game,
+      fnb: rooms.fnb,
+      cash,
+      transfer,
+      total: rooms.game + rooms.fnb,
+      closed: Boolean(closed),
+      categories: rooms.categories.map(({ id, name, total }) => ({ id, name, total })),
+    };
   }
 
   async closeDay(session: SessionPayload | null, date: string, venueId?: string) {
@@ -1028,37 +1035,15 @@ export class HubService {
       include: { bills: true },
     });
     const categories = await this.prisma.gameCategory.findMany({ where: { venueId: venue.id }, orderBy: { id: 'asc' } });
-    const totals = new Map(categories.map((category) => [category.id, 0]));
-    const defaultByMode = new Map<GameKind, string>();
-    for (const category of categories) {
-      if (!defaultByMode.has(category.billMode)) defaultByMode.set(category.billMode, category.id);
-    }
-    if (!defaultByMode.has(GameKind.sat)) {
-      const satRoom = categories.find((category) => category.name === 'Kịch bản sát') || categories.find((category) => category.billMode === GameKind.board);
-      if (satRoom) defaultByMode.set(GameKind.sat, satRoom.id);
-    }
-    let fnb = 0;
-    let game = 0;
-    for (const r of receipts) {
-      const day = toVnDate(r.createdAt);
-      if (!dates.includes(day)) continue;
-      for (const b of r.bills) {
-        if (b.type === 'fnb') {
-          fnb += b.total;
-          continue;
-        }
-        game += b.total;
-        const bucket = b.categoryId || (b.categoryKind ? defaultByMode.get(b.categoryKind) : undefined);
-        if (bucket && totals.has(bucket)) totals.set(bucket, (totals.get(bucket) || 0) + b.total);
-      }
-    }
+    const bills = receipts.flatMap((receipt) => (dates.includes(toVnDate(receipt.createdAt)) ? receipt.bills : []));
+    const rooms = tallyRooms(categories, bills);
     return {
       year,
       period,
       closedDays: dates.length,
-      fnb,
-      game,
-      categories: categories.map((category) => ({ id: category.id, name: category.name, billMode: category.billMode, total: totals.get(category.id) || 0 })),
+      fnb: rooms.fnb,
+      game: rooms.game,
+      categories: rooms.categories,
     };
   }
 
@@ -1168,6 +1153,37 @@ function satGameFields(data: { basePrice: number; minPlayers?: number; maxPlayer
   if (!duration) throw new BadRequestException('Nhập thời gian chơi');
   if (!Number.isInteger(basePrice) || basePrice < 0 || !Number.isInteger(nightPrice) || nightPrice < 0) throw new BadRequestException('Giá không hợp lệ');
   return { minPlayers, maxPlayers, duration, nightPrice, basePrice };
+}
+
+function tallyRooms(
+  categories: { id: string; name: string; billMode: GameKind }[],
+  bills: { type: string; total: number; categoryId: string | null; categoryKind: GameKind | null }[],
+) {
+  const totals = new Map(categories.map((category) => [category.id, 0]));
+  const defaultByMode = new Map<GameKind, string>();
+  for (const category of categories) {
+    if (!defaultByMode.has(category.billMode)) defaultByMode.set(category.billMode, category.id);
+  }
+  if (!defaultByMode.has(GameKind.sat)) {
+    const satRoom = categories.find((category) => category.name === 'Kịch bản sát') || categories.find((category) => category.billMode === GameKind.board);
+    if (satRoom) defaultByMode.set(GameKind.sat, satRoom.id);
+  }
+  let fnb = 0;
+  let game = 0;
+  for (const bill of bills) {
+    if (bill.type === 'fnb') {
+      fnb += bill.total;
+      continue;
+    }
+    game += bill.total;
+    const bucket = bill.categoryId || (bill.categoryKind ? defaultByMode.get(bill.categoryKind) : undefined);
+    if (bucket && totals.has(bucket)) totals.set(bucket, (totals.get(bucket) || 0) + bill.total);
+  }
+  return {
+    fnb,
+    game,
+    categories: categories.map((category) => ({ id: category.id, name: category.name, billMode: category.billMode, total: totals.get(category.id) || 0 })),
+  };
 }
 
 function toVnDate(d: Date) {
