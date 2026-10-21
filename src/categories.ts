@@ -8,6 +8,11 @@ export const defaultParents: { billMode: GameKind; name: string }[] = [
   { billMode: GameKind.sat, name: 'Kịch bản sát' },
 ];
 
+export function headPricedRoom(category: { billMode: GameKind; name: string }) {
+  const boardName = defaultParents.find((item) => item.billMode === GameKind.board)?.name;
+  return category.billMode === GameKind.sat || (category.billMode === GameKind.board && category.name === boardName);
+}
+
 export const defaultSatGames: { code: string; name: string; minPlayers: number; maxPlayers: number; duration: string; basePrice: number; nightPrice: number }[] = [
   { code: 'SAT-01', name: 'GƯƠNG', minPlayers: 4, maxPlayers: 4, duration: '3h', basePrice: 179000, nightPrice: 219000 },
   { code: 'SAT-02', name: 'LÊN ĐƯỜNG', minPlayers: 5, maxPlayers: 5, duration: '4h', basePrice: 189000, nightPrice: 229000 },
