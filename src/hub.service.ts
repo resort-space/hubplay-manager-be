@@ -11,7 +11,7 @@ import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { PrismaService } from './prisma.service';
 import { isSystemAdmin, sessionRoles, SessionPayload } from './auth.util';
-import { ensureDefaultCategories, ensureEscapeCategory } from './categories';
+import { ensureDefaultCategories, ensureEscapeCategory, headPricedRoom } from './categories';
 import { ensureDefaultMenu } from './menu';
 
 const registerStore = new Map<string, { code: string; exp: number; name: string; passwordHash: string }>();
@@ -516,17 +516,17 @@ export class HubService {
     const roomId = data.roomId || existing?.roomId || null;
     await this.assertCodeFree(venue.id, code, { roomId: roomId || undefined, subGameId: existing?.id });
     const pricingUnit = PricingUnit.per_session;
-    const sat = category.billMode === GameKind.sat ? satGameFields(data) : null;
-    const basePrice = sat ? sat.basePrice : data.basePrice;
+    const head = headPricedRoom(category) ? satGameFields(data) : null;
+    const basePrice = head ? head.basePrice : data.basePrice;
     try {
       if (existing) {
         return await this.prisma.subGame.update({
           where: { id: existing.id },
-          data: { name, code, basePrice, categoryId: category.id, pricingUnit, roomId, tags: data.tags ?? existing.tags, active: data.active ?? existing.active, ...(sat ?? {}) },
+          data: { name, code, basePrice, categoryId: category.id, pricingUnit, roomId, tags: data.tags ?? existing.tags, active: data.active ?? existing.active, ...(head ?? {}) },
         });
       }
       return await this.prisma.subGame.create({
-        data: { venueId: venue.id, categoryId: category.id, roomId, name, code, basePrice, pricingUnit, tags: data.tags ?? '', ...(sat ?? {}) },
+        data: { venueId: venue.id, categoryId: category.id, roomId, name, code, basePrice, pricingUnit, tags: data.tags ?? '', ...(head ?? {}) },
       });
     } catch (error) {
       if (error instanceof ForbiddenException || error instanceof BadRequestException) throw error;
@@ -907,11 +907,16 @@ export class HubService {
       }
       const playerCount = Number(line.playerCount);
       if (!Number.isInteger(playerCount) || playerCount < 1) throw new BadRequestException('Nhập số người');
-      if (game.category.billMode === GameKind.sat) {
-        if (priced.some((row) => row.kind === BillLineKind.subgame)) throw new BadRequestException('Một phiếu một kịch bản');
+      if (headPricedRoom(game.category)) {
+        if (priced.some((row) => row.kind === BillLineKind.subgame)) {
+          throw new BadRequestException(game.category.billMode === GameKind.sat ? 'Một phiếu một kịch bản' : 'Một phiếu một game');
+        }
         const shift = line.shift === 'night' ? 'night' : line.shift === 'day' ? 'day' : '';
         if (!shift) throw new BadRequestException('Chọn ca ngày hoặc ca đêm');
-        if (playerCount > game.maxPlayers) throw new BadRequestException(`Kịch bản này tối đa ${game.maxPlayers} người`);
+        if (playerCount > game.maxPlayers) {
+          const who = game.category.billMode === GameKind.sat ? 'Kịch bản này' : 'Game này';
+          throw new BadRequestException(`${who} tối đa ${game.maxPlayers} người`);
+        }
         const unitPrice = shift === 'night' ? game.nightPrice : game.basePrice;
         const duration = game.duration ? ` · ${game.duration}` : '';
         const price = new Intl.NumberFormat('vi-VN').format(unitPrice);
@@ -922,9 +927,10 @@ export class HubService {
           unitPrice,
           ledger: 'game',
           categoryId: game.categoryId,
-          categoryKind: GameKind.sat,
+          categoryKind: game.category.billMode,
           subGameId: game.id,
           playerCount,
+          head: true,
         });
         continue;
       }
@@ -943,15 +949,15 @@ export class HubService {
     if (discountAt) {
       const found = await this.prisma.discountCode.findUnique({ where: { venueId_code: { venueId, code: discountAt.code } } });
       if (!found?.active || !Number.isInteger(found.percent) || found.percent < 1 || found.percent > 100) throw new BadRequestException('Mã giảm không dùng được');
-      const satLine = priced.find((line) => line.kind === BillLineKind.subgame && line.categoryKind === GameKind.sat);
+      const headLine = priced.find((line) => line.kind === BillLineKind.subgame && line.head);
       const room = priced.reduce((sum, line) => (line.kind === BillLineKind.subgame ? sum + line.qty * line.unitPrice : sum), 0);
       if (room <= 0) throw new BadRequestException('Chưa có giá phòng để giảm');
-      const perPerson = satLine ? Math.round(satLine.unitPrice * found.percent / 100) : 0;
+      const perPerson = headLine ? Math.round(headLine.unitPrice * found.percent / 100) : 0;
       priced[discountAt.index] = {
         kind: BillLineKind.discount,
         description: `Khuyến mãi ${found.code}`,
-        qty: satLine ? satLine.qty : 1,
-        unitPrice: satLine ? -perPerson : -Math.round(room * found.percent / 100),
+        qty: headLine ? headLine.qty : 1,
+        unitPrice: headLine ? -perPerson : -Math.round(room * found.percent / 100),
         ledger: 'game',
       };
     }
@@ -1131,6 +1137,7 @@ type ReceiptLine = {
   categoryId?: string | null;
   subGameId?: string | null;
   playerCount?: number | null;
+  head?: boolean;
 };
 
 function isUnique(error: unknown) {

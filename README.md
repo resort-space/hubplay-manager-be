@@ -20,7 +20,7 @@ Tài khoản seed `sysadmin` (system-admin), `editadmin` (edit-admin), `quay` (a
 
 OTP xác nhận SĐT lúc đăng ký luôn là `000000` khi `OTP_DEV=true`.
 
-Cơ sở seed: Door Escape, 6 ngõ 78 đường Lương Ngọc Quyến, mã `DER`. Seed còn 13 ca, 3 nhóm game, kịch bản `SAT-01` … `SAT-21` nếu chưa có mã, 2 phòng escape (`R1`, `R2`), mã `HUB10`, nội dung trang chủ, và các món còn thiếu trong `defaultMenu` (đồ uống và đồ ăn). Món đã có cùng loại, tên và giá giữ nguyên. Món không nằm trong danh sách đó, kể cả món đã xóa, không bị seed đụng.
+Cơ sở seed: Doors Escape, Số 6, Ngõ 78 Đường Lương Ngọc Quyến, TP. Thái Nguyên, mã `DER`. Seed còn 13 ca, 3 nhóm game, kịch bản `SAT-01` … `SAT-21` nếu chưa có mã, 2 phòng escape (`R1`, `R2`), mã `HUB10`, nội dung trang chủ, và các món còn thiếu trong `defaultMenu` (đồ uống và đồ ăn). Món đã có cùng loại, tên và giá giữ nguyên. Món không nằm trong danh sách đó, kể cả món đã xóa, không bị seed đụng.
 
 Database Postgres mới (service backend trên Coolify vừa trỏ `DATABASE_URL` trống): mở terminal của đúng service backend, không chạy ở máy local và không chạy trong service frontend. `pwd` phải là thư mục có `package.json` và `prisma/schema.prisma` (thường là `/app`). Chạy lần lượt, vì seed cần bảng đã có:
 
