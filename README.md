@@ -16,6 +16,14 @@ npm run build
 node dist/main.js
 ```
 
+## Giờ Việt Nam
+
+Các mốc `createdAt`, `paidAt`, `closedAt`, `uploadedAt` là `timestamptz`. File `prisma/vn-time.sql` đổi cột `timestamp` đang lưu giờ UTC sang `timestamptz`, rồi đặt timezone của đúng database đang nối thành `Asia/Ho_Chi_Minh`. Khi xem bảng, giờ hiện là giờ Việt Nam. Ngày doanh thu vẫn tính từ `00:00` đến `00:00` hôm sau theo `+07:00`.
+
+Trên database production: mở terminal service PostgreSQL trong Coolify, chưa phải terminal backend. `SHOW timezone` phải còn là `UTC`. Dán hết `prisma/vn-time.sql` rồi chạy. Gõ `\q`, vào lại terminal, `SHOW timezone` phải ra `Asia/Ho_Chi_Minh`. Sau đó mới deploy hoặc `db push`. Push lúc timezone đã là giờ Việt Nam mà sáu cột chưa convert sẽ hiểu số UTC cũ là giờ Việt Nam và lệch 7 giờ.
+
+Database dev không bị file này đụng. Muốn dev giống production thì chạy cùng file trên database dev, cũng khi `SHOW timezone` còn `UTC`.
+
 Tài khoản seed `sysadmin` (system-admin), `editadmin` (edit-admin), `quay` (admin quầy) dùng chung mật khẩu `SEED_ADMIN_PASSWORD`. Đặt biến này trên service backend (Coolify) hoặc trong `.env` local. Thiếu hoặc để trống thì `db:seed` dừng, không tạo tài khoản.
 
 OTP xác nhận SĐT lúc đăng ký luôn là `000000` khi `OTP_DEV=true`.

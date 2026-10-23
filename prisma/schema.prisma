@@ -178,7 +178,7 @@ model Booking {
   cancelNote   String        @default("")
   status       BookingStatus @default(pending_confirm)
   createdBy    String        @default("user")
-  createdAt    DateTime      @default(now())
+  createdAt    DateTime      @default(now()) @db.Timestamptz(3)
   receipts     Receipt[]
 }
 
@@ -214,7 +214,7 @@ model Receipt {
   playSession     String         @default("")
   paymentMethod   PaymentMethod?
   paymentStatus   PaymentStatus  @default(unpaid)
-  createdAt       DateTime       @default(now())
+  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
   bills           Bill[]
   payments        BillPaymentHistory[]
 }
@@ -250,7 +250,7 @@ model BillPaymentHistory {
   receipt   Receipt       @relation(fields: [receiptId], references: [id])
   amount    Int
   method    PaymentMethod
-  paidAt    DateTime      @default(now())
+  paidAt    DateTime      @default(now()) @db.Timestamptz(3)
   staffId   String?
   note      String        @default("")
 }
@@ -260,7 +260,7 @@ model DayClose {
   venueId          String
   venue            Venue    @relation(fields: [venueId], references: [id])
   date             String
-  closedAt         DateTime @default(now())
+  closedAt         DateTime @default(now()) @db.Timestamptz(3)
   closedByAdminId  String
   @@unique([venueId, date])
 }
@@ -277,7 +277,7 @@ model UserPlayPhoto {
   fileRef           String
   caption           String   @default("")
   uploadedByStaffId String?
-  uploadedAt        DateTime @default(now())
+  uploadedAt        DateTime @default(now()) @db.Timestamptz(3)
 }
 
 model CmsContent {
@@ -294,5 +294,5 @@ model ContactMessage {
   name      String
   phone     String
   content   String
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 }

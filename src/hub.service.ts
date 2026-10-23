@@ -979,7 +979,7 @@ export class HubService {
     return this.prisma.receipt.findMany({
       where: {
         venueId: venue.id,
-        ...(date ? { createdAt: { gte: new Date(`${date}T00:00:00+07:00`), lt: new Date(`${date}T23:59:59+07:00`) } } : {}),
+        ...(date ? { createdAt: vnDayRange(date) } : {}),
       },
       include: { bills: { include: { lines: true } }, payments: true },
       orderBy: { createdAt: 'desc' },
@@ -993,7 +993,7 @@ export class HubService {
       where: {
         venueId: venue.id,
         paymentStatus: 'paid',
-        createdAt: { gte: new Date(`${date}T00:00:00+07:00`), lt: new Date(new Date(`${date}T00:00:00+07:00`).getTime() + 86400000) },
+        createdAt: vnDayRange(date),
       },
       include: { bills: true, payments: true },
     });
@@ -1191,6 +1191,11 @@ function tallyRooms(
     game,
     categories: categories.map((category) => ({ id: category.id, name: category.name, billMode: category.billMode, total: totals.get(category.id) || 0 })),
   };
+}
+
+function vnDayRange(date: string) {
+  const start = new Date(`${date}T00:00:00+07:00`);
+  return { gte: start, lt: new Date(start.getTime() + 86400000) };
 }
 
 function toVnDate(d: Date) {
