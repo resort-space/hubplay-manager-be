@@ -266,7 +266,8 @@ export class HubService {
       include: {
         room: true,
         receipts: {
-          orderBy: { createdAt: 'asc' },
+          where: { voidedAt: null },
+          orderBy: { createdAt: 'desc' },
           take: 1,
           include: {
             bills: { include: { lines: { select: { description: true, qty: true, unitPrice: true } } } },
@@ -393,9 +394,9 @@ export class HubService {
     this.assertStaff(session, [AdminRole.counter_admin, AdminRole.system_admin, AdminRole.edit_admin]);
     const cancelNote = note.trim();
     if (!cancelNote) throw new BadRequestException('Nhập lý do hủy');
-    const booking = await this.prisma.booking.findUnique({ where: { id }, include: { _count: { select: { receipts: true } } } });
+    const booking = await this.prisma.booking.findUnique({ where: { id } });
     if (!booking || booking.status === BookingStatus.cancelled) throw new BadRequestException('Ca không còn để hủy');
-    if (booking._count.receipts > 0) throw new BadRequestException('Ca đã thanh toán, không hủy được');
+    if (await this.openReceipt(booking.id)) throw new BadRequestException('Ca đã thanh toán, không hủy được');
     await this.assertRecordVenue(session!, booking.venueId);
     return this.prisma.booking.update({ where: { id }, data: { status: BookingStatus.cancelled, cancelNote } });
   }
@@ -406,9 +407,9 @@ export class HubService {
     session: SessionPayload | null,
   ) {
     this.assertStaff(session, [AdminRole.counter_admin, AdminRole.system_admin, AdminRole.edit_admin]);
-    const booking = await this.prisma.booking.findUnique({ where: { id }, include: { room: true, _count: { select: { receipts: true } } } });
+    const booking = await this.prisma.booking.findUnique({ where: { id }, include: { room: true } });
     if (!booking || booking.status === BookingStatus.cancelled) throw new BadRequestException('Ca không còn để sửa');
-    if (booking._count.receipts > 0) throw new BadRequestException('Ca đã thanh toán, không sửa được');
+    if (await this.openReceipt(booking.id)) throw new BadRequestException('Ca đã thanh toán, không sửa được');
     await this.assertRecordVenue(session!, booking.venueId);
     const guestName = input.guestName.trim();
     const phone = input.phone.trim();
@@ -795,6 +796,7 @@ export class HubService {
       playTime?: string;
       playSession?: string;
       paymentMethod: PaymentMethod;
+      cashTendered?: number | null;
       lines: ReceiptLineInput[];
       venueId?: string;
     },
@@ -814,18 +816,19 @@ export class HubService {
     if (games.length && !playTime) throw new BadRequestException('Nhập thời gian');
     const playSession = '';
     if (input.bookingId && mode && mode !== GameKind.escape) throw new BadRequestException('Phiếu phòng này không gắn ca');
+    const cashTendered = handedCash(input.paymentMethod, input.cashTendered);
     if (input.bookingId) {
-      const booking = await this.prisma.booking.findUnique({ where: { id: input.bookingId }, include: { _count: { select: { receipts: true } } } });
+      const booking = await this.prisma.booking.findUnique({ where: { id: input.bookingId } });
       if (!booking || booking.venueId !== venue.id) throw new BadRequestException('Ca không thuộc cơ sở này');
       if (booking.status === BookingStatus.cancelled) throw new BadRequestException('Ca đã hủy');
-      if (booking._count.receipts > 0) throw new BadRequestException('Ca đã thanh toán');
+      if (await this.openReceipt(input.bookingId)) throw new BadRequestException('Ca đã thanh toán');
     }
     const anchor = games[0];
     const sum = (rows: ReceiptLine[]) => rows.reduce((total, line) => total + line.qty * line.unitPrice, 0);
     const total = sum(lines);
     return this.prisma.$transaction(async (tx) => {
       if (input.bookingId) {
-        const taken = await tx.receipt.findFirst({ where: { bookingId: input.bookingId }, select: { id: true } });
+        const taken = await tx.receipt.findFirst({ where: { bookingId: input.bookingId, voidedAt: null }, select: { id: true } });
         if (taken) throw new BadRequestException('Ca đã thanh toán');
         const booking = await tx.booking.findUnique({ where: { id: input.bookingId }, include: { room: true } });
         if (booking?.status === BookingStatus.pending_confirm) await this.holdBooking(tx, booking);
@@ -868,7 +871,7 @@ export class HubService {
       await makeBill(BillType.game, gameLines, anchor ? { id: anchor.categoryId, kind: anchor.categoryKind } : undefined);
       await makeBill(BillType.fnb, fnbLines);
       await tx.billPaymentHistory.create({
-        data: { receiptId: receipt.id, amount: total, method: input.paymentMethod, staffId: session!.sub },
+        data: { receiptId: receipt.id, amount: total, method: input.paymentMethod, staffId: session!.sub, cashTendered },
       });
       return this.receiptDetail(receipt.id, tx);
     });
@@ -966,6 +969,51 @@ export class HubService {
     return priced;
   }
 
+  private openReceipt(bookingId: string) {
+    return this.prisma.receipt.findFirst({ where: { bookingId, voidedAt: null }, select: { id: true } });
+  }
+
+  private async receiptSlips(venueId: string, receipts: DayReceipt[]) {
+    const staffIds = [...new Set(receipts.flatMap((receipt) => receipt.payments.flatMap((payment) => (payment.staffId ? [payment.staffId] : []))))];
+    const [slots, staff] = await Promise.all([
+      this.prisma.timeSlot.findMany({ where: { venueId }, select: { slotIndex: true, startTime: true, endTime: true } }),
+      staffIds.length
+        ? this.prisma.adminUser.findMany({ where: { id: { in: staffIds } }, select: { id: true, name: true, username: true } })
+        : Promise.resolve([]),
+    ]);
+    const slotByIndex = new Map(slots.map((slot) => [slot.slotIndex, slot]));
+    const names = new Map(staff.map((person) => [person.id, person.name || person.username]));
+    return receipts.map((receipt) => {
+      const bills = [...receipt.bills].sort((a, b) => Number(a.type !== BillType.game) - Number(b.type !== BillType.game));
+      const lines = bills.flatMap((bill) => bill.lines.map((line) => ({ description: line.description, qty: line.qty, unitPrice: line.unitPrice })));
+      const payment = receipt.payments[0];
+      const slot = receipt.booking ? slotByIndex.get(receipt.booking.slotIndex) : undefined;
+      return {
+        id: receipt.id,
+        guestName: receipt.guestName,
+        phone: receipt.phone,
+        playTime: receipt.playTime,
+        paymentMethod: receipt.paymentMethod,
+        cashTendered: receipt.paymentMethod === PaymentMethod.cash ? payment?.cashTendered ?? null : null,
+        paidAt: (payment?.paidAt ?? receipt.createdAt).toISOString(),
+        cashier: payment?.staffId ? names.get(payment.staffId) || '' : '',
+        total: lines.reduce((sum, line) => sum + line.qty * line.unitPrice, 0),
+        lines,
+        booking: receipt.booking
+          ? {
+              sessionCode: receipt.booking.sessionCode,
+              roomName: receipt.booking.room.name,
+              date: receipt.booking.date,
+              slotIndex: receipt.booking.slotIndex,
+              startTime: slot?.startTime || '',
+              endTime: slot?.endTime || '',
+              playerCount: receipt.booking.playerCount,
+            }
+          : null,
+      };
+    });
+  }
+
   private receiptDetail(id: string, tx: Prisma.TransactionClient | PrismaService = this.prisma) {
     return tx.receipt.findUnique({
       where: { id },
@@ -979,6 +1027,7 @@ export class HubService {
     return this.prisma.receipt.findMany({
       where: {
         venueId: venue.id,
+        voidedAt: null,
         ...(date ? { createdAt: vnDayRange(date) } : {}),
       },
       include: { bills: { include: { lines: true } }, payments: true },
@@ -993,9 +1042,15 @@ export class HubService {
       where: {
         venueId: venue.id,
         paymentStatus: 'paid',
+        voidedAt: null,
         createdAt: vnDayRange(date),
       },
-      include: { bills: true, payments: true },
+      include: {
+        bills: { include: { lines: { orderBy: { id: 'asc' } } } },
+        payments: { orderBy: { paidAt: 'asc' } },
+        booking: { include: { room: { select: { name: true } } } },
+      },
+      orderBy: { createdAt: 'desc' },
     });
     const [closed, categories] = await Promise.all([
       this.prisma.dayClose.findUnique({ where: { venueId_date: { venueId: venue.id, date } } }),
@@ -1019,7 +1074,28 @@ export class HubService {
       total: rooms.game + rooms.fnb,
       closed: Boolean(closed),
       categories: rooms.categories.map(({ id, name, total }) => ({ id, name, total })),
+      receipts: await this.receiptSlips(venue.id, receipts),
     };
+  }
+
+  async voidReceipt(session: SessionPayload | null, id: string, note: string, venueId?: string) {
+    const staff = this.assertStaff(session, [AdminRole.edit_admin, AdminRole.system_admin]);
+    const voidNote = note.trim();
+    if (!voidNote) throw new BadRequestException('Nhập lý do xóa');
+    const receipt = await this.prisma.receipt.findUnique({ where: { id } });
+    if (!receipt || receipt.paymentStatus !== 'paid') throw new NotFoundException('Không thấy phiếu');
+    if (venueId && venueId !== receipt.venueId) throw new ForbiddenException('Không đúng cơ sở');
+    await this.assertRecordVenue(staff, receipt.venueId);
+    if (receipt.voidedAt) throw new BadRequestException('Phiếu đã xóa');
+    const closed = await this.prisma.dayClose.findUnique({
+      where: { venueId_date: { venueId: receipt.venueId, date: toVnDate(receipt.createdAt) } },
+    });
+    if (closed) throw new BadRequestException('Ngày đã chốt, không xóa được');
+    await this.prisma.receipt.update({
+      where: { id },
+      data: { voidedAt: new Date(), voidedByAdminId: staff.sub, voidNote },
+    });
+    return this.dayRevenue(session, toVnDate(receipt.createdAt), receipt.venueId);
   }
 
   async closeDay(session: SessionPayload | null, date: string, venueId?: string) {
@@ -1037,7 +1113,7 @@ export class HubService {
     const closes = await this.prisma.dayClose.findMany({ where: { venueId: venue.id, date: { startsWith: String(year) } } });
     const dates = closes.map((c) => c.date).filter((d) => matchPeriod(d, year, period));
     const receipts = await this.prisma.receipt.findMany({
-      where: { venueId: venue.id, paymentStatus: 'paid' },
+      where: { venueId: venue.id, paymentStatus: 'paid', voidedAt: null },
       include: { bills: true },
     });
     const categories = await this.prisma.gameCategory.findMany({ where: { venueId: venue.id }, orderBy: { id: 'asc' } });
@@ -1082,7 +1158,7 @@ export class HubService {
     const [bookings, receipts, photos] = await Promise.all([
       this.prisma.booking.findMany({ where: { phone }, include: { room: true, venue: true }, orderBy: { date: 'desc' } }),
       this.prisma.receipt.findMany({
-        where: { phone },
+        where: { phone, voidedAt: null },
         include: { bills: { include: { lines: true } }, payments: true, venue: true },
         orderBy: { createdAt: 'desc' },
       }),
@@ -1160,6 +1236,21 @@ function satGameFields(data: { basePrice: number; minPlayers?: number; maxPlayer
   if (!duration) throw new BadRequestException('Nhập thời gian chơi');
   if (!Number.isInteger(basePrice) || basePrice < 0 || !Number.isInteger(nightPrice) || nightPrice < 0) throw new BadRequestException('Giá không hợp lệ');
   return { minPlayers, maxPlayers, duration, nightPrice, basePrice };
+}
+
+type DayReceipt = Prisma.ReceiptGetPayload<{
+  include: {
+    bills: { include: { lines: true } };
+    payments: true;
+    booking: { include: { room: { select: { name: true } } } };
+  };
+}>;
+
+function handedCash(method: PaymentMethod, value: number | null | undefined) {
+  if (method !== PaymentMethod.cash) return null;
+  const amount = value ?? 0;
+  if (!Number.isInteger(amount) || amount < 0) throw new BadRequestException('Tiền khách trả không hợp lệ');
+  return amount;
 }
 
 function tallyRooms(

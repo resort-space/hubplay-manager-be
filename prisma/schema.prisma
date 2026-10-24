@@ -214,6 +214,9 @@ model Receipt {
   playSession     String         @default("")
   paymentMethod   PaymentMethod?
   paymentStatus   PaymentStatus  @default(unpaid)
+  voidedAt        DateTime?      @db.Timestamptz(3)
+  voidedByAdminId String?
+  voidNote        String         @default("")
   createdAt       DateTime       @default(now()) @db.Timestamptz(3)
   bills           Bill[]
   payments        BillPaymentHistory[]
@@ -250,9 +253,10 @@ model BillPaymentHistory {
   receipt   Receipt       @relation(fields: [receiptId], references: [id])
   amount    Int
   method    PaymentMethod
-  paidAt    DateTime      @default(now()) @db.Timestamptz(3)
-  staffId   String?
-  note      String        @default("")
+  paidAt       DateTime      @default(now()) @db.Timestamptz(3)
+  staffId      String?
+  note         String        @default("")
+  cashTendered Int?
 }
 
 model DayClose {

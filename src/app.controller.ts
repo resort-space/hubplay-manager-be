@@ -298,6 +298,7 @@ export class AppController {
       playTime?: string;
       playSession?: string;
       paymentMethod: PaymentMethod;
+      cashTendered?: number | null;
       lines: { kind: BillLineKind; description: string; qty: number; unitPrice: number; ledger: 'game' | 'fnb'; categoryKind?: GameKind; categoryId?: string; subGameId?: string; playerCount?: number; code?: string; shift?: 'day' | 'night' }[];
       venueId?: string;
     },
@@ -308,6 +309,11 @@ export class AppController {
   @Get('receipts')
   receipts(@Req() req: Request, @Query('date') date?: string, @Query('venueId') venueId?: string) {
     return this.hub.listReceipts(sessionOf(req), date, venueId);
+  }
+
+  @Post('receipts/:id/void')
+  voidReceipt(@Req() req: Request, @Param('id') id: string, @Body() body: { note?: string; venueId?: string }) {
+    return this.hub.voidReceipt(sessionOf(req), id, body.note || '', body.venueId);
   }
 
   @Get('revenue/day')
